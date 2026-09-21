@@ -1,0 +1,22 @@
+[Unit]
+Description=VK Interactive CLI Bot (VENV)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/vk-api
+
+# Явный запуск через Python внутри вашего виртуального окружения
+ExecStart=/root/vk-api/venv/bin/python3 /root/vk-api/async_server_bot.py
+
+# Переменная PATH, чтобы скрипт видел системные утилиты так же, как внутри venv
+Environment="PATH=/root/vk-api/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=UTF-8
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
