@@ -1,0 +1,1 @@
+ssh,apt,nano,mysql,ufw

@@ -1,0 +1,23 @@
+# Виртуальное окружение Python
+venv/
+ENV/
+env/
+.env
+.vkbottle/
+# Сюда мы прячем твой VK-токен и ID админа
+bot_config.txt
+
+*.log
+bot_server.log
+
+# Кэш Python компилятора
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Настройки среды разработки (если откроешь код в VS Code / PyCharm)
+.vscode/
+.idea/
+*.swp
