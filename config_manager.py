@@ -11,15 +11,15 @@ INTERACTIVE_FILE = "interactive_list.txt"
 dynamic_commands_map = {}
 
 def get_version() -> str:
-    """Считывает версию из файла version.txt на лету. По умолчанию 4.0.0"""
+    """Считывает версию из файла version.txt на лету. По умолчанию 5.2.0"""
     if not os.path.exists(VERSION_FILE):
         try:
-            with open(VERSION_FILE, "w", encoding="utf-8") as f: f.write("4.0.0")
+            with open(VERSION_FILE, "w", encoding="utf-8") as f: f.write("5.2.0")
         except: pass
-        return "4.0.0"
+        return "5.2.0"
     try:
         with open(VERSION_FILE, "r", encoding="utf-8") as f: return f.read().strip()
-    except: return "4.0.0"
+    except: return "5.2.0"
 
 def load_secret_config():
     """Считывает ТОКЕН и список ADMINS из bot_config.txt"""
@@ -105,6 +105,8 @@ def generate_dynamic_keyboard() -> str:
         
     kb = Keyboard(one_time=False, inline=False)
     dynamic_commands_map["📴 Off"] = "echo 'false' > keyboard_enable.txt"
+    # Маппим аварийную кнопку хард-ресета
+    dynamic_commands_map["💀 Hard Reset"] = "hard-reset"
     
     if os.path.exists(KEYBOARD_FILE):
         try:
@@ -120,24 +122,23 @@ def generate_dynamic_keyboard() -> str:
         if "keyboard_enable.txt" in clean_line: continue
         if "(" in clean_line and clean_line.endswith(")"):
             try:
-                # ИСПРАВЛЕНО И ПРОВЕРЕНО (v4.0.0): Железобетонные строковые срезы без списков rsplit!
                 btn_name, raw_cmd = clean_line.split("(", 1)
                 btn_name = btn_name.strip()
-                btn_cmd = raw_cmd[:-1].strip() # Просто срезаем последнюю закрывающую скобку ')'
+                btn_cmd = raw_cmd[:-1].strip()
                 
                 if btn_name and btn_cmd:
                     dynamic_commands_map[btn_name] = btn_cmd
-                    
-                    if buttons_count > 0 and buttons_count % 4 == 0: 
-                        kb.row()
+                    if buttons_count > 0 and buttons_count % 4 == 0: kb.row()
                     color = KeyboardButtonColor.POSITIVE if "старт" in btn_name.lower() else KeyboardButtonColor.PRIMARY
                     kb.add(Text(btn_name), color=color)
                     buttons_count += 1
             except: pass
 
     if buttons_count > 0: kb.row()
+    # ИСПРАВЛЕНО (v5.2.0): Системный ряд теперь содержит 4 компактные кнопки
     kb.add(Text("⌨️ Ctrl+C"), color=KeyboardButtonColor.PRIMARY)
     kb.add(Text("📴 Off"), color=KeyboardButtonColor.SECONDARY)
+    kb.add(Text("💀 Hard Reset"), color=KeyboardButtonColor.SECONDARY) # Белая кнопка спасения
     kb.add(Text("🔄 Reset"), color=KeyboardButtonColor.NEGATIVE)
     
     return kb.get_json()

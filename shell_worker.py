@@ -3,12 +3,15 @@ import re
 from datetime import datetime
 import config_manager
 
-VERSION = "5.0.0"
+VERSION = "5.2.1"
 MARKER = "___END_OF_COMMAND___"
 user_interactive_mode = {}
 current_flood_multiplier = 1.0
+
+# ИСПРАВЛЕНО (v5.2.1): Кэш путей теперь монолитно живёт здесь, решая проблему Circular Import!
 last_valid_path = "/root"
 
+# Синтаксически корректный Regex для удаления ANSI-кодов цвета
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-9;?]*[a-zA-Z])')
 
 def log_message(level: str, message: str):
@@ -70,7 +73,7 @@ async def send_safe_message(api, peer_id: int, text: str, is_interactive: bool =
                     break
 
 async def start_output_listener(user_id: int, process_reader, api, process):
-    """Фоновый слушатель логов v5.0.0 (Потоковый стриминг без сброса интерактива)"""
+    """Фоновый слушатель логов v5.2.1 (Исправлено сохранение путей и выгрузка статистики)"""
     global last_valid_path
     log_message("INFO", f"Запущено фоновое чтение PTY для пользователя {user_id} (v{VERSION})")
     
@@ -101,7 +104,10 @@ async def start_output_listener(user_id: int, process_reader, api, process):
                             
                             raw_path = clean_marker_line[idx + len(MARKER):].replace("\r", "").replace("\n", "").strip()
                             current_path = raw_path.replace(":", "").strip()
-                            last_valid_path = current_path
+                            
+                            # ИСПРАВЛЕНО (v5.2.1): Обновляем локальный кэш без опасных импортов!
+                            if current_path and "#" not in current_path and "/" in current_path:
+                                last_valid_path = current_path
                     except Exception as e_parse:
                         log_message("ERROR", f"Ошибка парсинга пути: {e_parse}")
                     
@@ -146,7 +152,9 @@ async def start_output_listener(user_id: int, process_reader, api, process):
                     is_active_interactive = user_interactive_mode.get(user_id, False) or (len(buffer) > 0 and (current_time - last_send_time) >= base_delay)
                     is_time_to_send = (current_time - last_send_time) >= (base_delay * current_flood_multiplier)
                     
-                    if is_time_to_send or is_active_interactive:
+                    # ИСПРАВЛЕНО (v5.2.1): Если в буфере лежит остаток логов (статистика пинга) после Ctrl+C,
+                    # мы выталкиваем её НЕМЕДЛЕННО, не затирая данные!
+                    if is_time_to_send or is_active_interactive or "statistics" in "".join(buffer).lower():
                         raw_chunk = "".join(buffer)
                         buffer.clear()
                         
