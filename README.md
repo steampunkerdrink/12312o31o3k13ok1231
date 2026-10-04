@@ -1,4 +1,3 @@
-
 # Setup
 
 ## Requirements
@@ -16,7 +15,7 @@ Use Python 3.12+
 ## Create and activate a virtual environment
 Create VK Group
 Enable Messages for Group (Настройки, сообщения, сообщения сообщества) https://vk.ru/clubID/settings/messages
-Enable Bot Capabilities (for inline_keyboard) (Настройки, сообщения, настройки для бота, возможности  ботов https://vk.ru/clubID/settings/bots
+#Enable Bot Capabilities (for inline_keyboard) (Настройки, сообщения, настройки для бота, возможности  ботов https://vk.ru/clubID/settings/bots
 Enable Long Poll API (Настройки, дополнительно, работа с API, Long Poll API) https://vk.ru/clubID?act=longpoll_api
 Setup access_token (Настройки, дополнительно, работа с API), доступы: сообщения соообщества, управление сообществом) https://vk.ru/clubID?act=tokens 
 
