@@ -6,11 +6,12 @@ import shell_worker
 import terminal_render
 from vkbottle.bot import Bot, Message
 
-# Универсальная загрузка фото: в vkbottle 4.7+ класс PhotoMessageUploader, раньше — MessageUploader
+# Универсальная загрузка фото/документов: в vkbottle 4.7+ отдельные классы, раньше — MessageUploader
 try:
-    from vkbottle import PhotoMessageUploader as _PhotoUploader
+    from vkbottle import PhotoMessageUploader as _PhotoUploader, DocMessagesUploader as _DocUploader
 except ImportError:
     from vkbottle import MessageUploader as _PhotoUploader
+    _DocUploader = None
 
 VERSION = config_manager.VERSION
 TOKEN, ALLOWED_ADMINS = config_manager.load_secret_config()
@@ -18,8 +19,13 @@ TOKEN, ALLOWED_ADMINS = config_manager.load_secret_config()
 bot = Bot(token=TOKEN)
 user_sessions = {}
 
-# Для отправки отрендеренных картинок в VK
-photo_uploader = _PhotoUploader(bot.api)
+# Загрузчики для отрендеренных картинок. Имя "output.png" важно: VK распознаёт формат
+# по расширению файла, иначе PNG под именем .jpg может давать ошибку "photo is undefined".
+try:
+    photo_uploader = _PhotoUploader(bot.api, attachment_name="output.png")
+except TypeError:
+    photo_uploader = _PhotoUploader(bot.api)
+doc_uploader = _DocUploader(bot.api) if _DocUploader is not None else None
 
 # Единый список команд внутреннего хард-ресета (используется в двух местах ниже)
 HARD_RESET_COMMANDS = ["hard-reset", "убей сессию", "kill-session", "💀 hard reset"]
@@ -91,19 +97,46 @@ async def run_as_art(user_id: int, command: str, message: Message):
         out = raw.decode("utf-8", errors="replace").strip()
         await message.answer(f"Команда вернула код {proc.returncode}:\n{out[-2000:]}")
         return
+    # 1) Рендерим PNG
     try:
         png = terminal_render.render(raw)
+    except Exception as e:
+        config_manager.log_message("ERROR", f"Ошибка рендера art-вывода: {e}")
+        await message.answer(
+            f"Не удалось отрисовать картинку: {e}\nСырой вывод:\n"
+            + raw.decode("utf-8", errors="replace")[-2000:]
+        )
+        return
+
+    # 2) Отправляем как фото
+    try:
         if hasattr(photo_uploader, "upload"):
             attachment = await photo_uploader.upload(file_source=png, peer_id=user_id)
         else:
             attachment = await photo_uploader.upload_photos(file_source=png, peer_id=user_id)
         await message.answer(attachment=attachment)
-    except Exception as e:
-        config_manager.log_message("ERROR", f"Ошибка рендера/загрузки art-вывода: {e}")
-        await message.answer(
-            f"Не удалось отрисовать картинку: {e}\nСырой вывод:\n"
-            + raw.decode("utf-8", errors="replace")[-2000:]
-        )
+        return
+    except Exception as e_photo:
+        config_manager.log_message("WARNING", f"Фото-загрузка не удалась ({e_photo}); пробуем документ")
+
+    # 3) Фолбэк: отправляем как документ (работает, если у токена есть право «Документы»)
+    if doc_uploader is not None:
+        try:
+            doc_attachment = await doc_uploader.upload(file_source=png, peer_id=user_id)
+            await message.answer(attachment=doc_attachment)
+            return
+        except Exception as e_doc:
+            config_manager.log_message("ERROR", f"Фото: {e_photo}; документ: {e_doc}")
+            await message.answer(
+                f"Не удалось отправить картинку (фото: {e_photo}; документ: {e_doc}).\n"
+                f"Сырой вывод:\n{raw.decode('utf-8', errors='replace')[-1500:]}"
+            )
+            return
+
+    await message.answer(
+        f"Не удалось отправить картинку (фото: {e_photo}).\n"
+        f"Сырой вывод:\n{raw.decode('utf-8', errors='replace')[-1500:]}"
+    )
 
 
 async def handle_art_command(user_id: int, text: str, message: Message):
