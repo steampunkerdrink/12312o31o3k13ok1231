@@ -42,6 +42,9 @@ PALETTE = {
 DEFAULT_FG = (235, 235, 235)
 DEFAULT_BG = (18, 18, 24)
 
+# Отступ (поля) вокруг содержимого картинки, в пикселях
+PADDING = 24
+
 # Разбор: сначала SGR (…m), потом прочие CSI/ESC-последовательности, потом один любой символ
 TOKEN = re.compile(r"\x1B\[([0-9;]*)m|\x1B\[[0-9;?]*[a-zA-Z]|\x1B[()][0-9A-Z]|[\s\S]")
 
@@ -206,12 +209,23 @@ def _render_text(rows):
     return img
 
 
+def _with_padding(img, pad: int = PADDING):
+    """Добавляет поля вокруг картинки. Фон берём из углового пикселя."""
+    if pad <= 0:
+        return img
+    bg = img.getpixel((0, 0))
+    out = Image.new("RGB", (img.width + 2 * pad, img.height + 2 * pad), bg)
+    out.paste(img, (pad, pad))
+    return out
+
+
 def render(source) -> bytes:
     """Принимает bytes или str, возвращает PNG bytes."""
     text = source.decode("utf-8", "replace") if isinstance(source, bytes) else source
     rows = _parse(text)
     is_art = any(c.char in BLOCK_CHARS for row in rows for c in row)
     img = _render_art(rows) if is_art else _render_text(rows)
+    img = _with_padding(img)
     buf = BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
