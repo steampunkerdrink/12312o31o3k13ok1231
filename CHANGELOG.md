@@ -7,6 +7,13 @@
 
 ---
 
+## [5.7.1] — 2026-10-11
+
+### Исправлено
+- Бот падал на старте с `TypeError: An asyncio.Future, a coroutine or an awaitable is required`:
+  в `bot.on_startup` / `on_shutdown` / `startup_tasks` добавлялись функции вместо корутин.
+  Теперь добавляются корутины; долгоживущий idle-watchdog помещён в `startup_tasks`.
+
 ## [5.7.0] — 2026-10-11
 
 ### Добавлено

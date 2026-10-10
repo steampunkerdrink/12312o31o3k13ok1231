@@ -78,9 +78,6 @@ async def _notify_startup():
             config_manager.log_message("ERROR", f"Не удалось отправить приветствие {admin}: {e}")
 
 
-bot.on_startup.append(_notify_startup)
-
-
 def _close_session(user_id: int):
     """Полностью закрыть PTY-сессию пользователя (без отправки сообщений)."""
     session = user_sessions.pop(user_id, None)
@@ -133,12 +130,12 @@ async def _cleanup_sessions():
         _close_session(uid)
 
 
-async def _start_background():
-    asyncio.create_task(_idle_watchdog())
-
-
-bot.on_startup.append(_start_background)
-bot.on_shutdown.append(_cleanup_sessions)
+# Регистрация в хуках vkbottle. ВАЖНО: это списки КОРУТИН (объектов), а не функций.
+# on_startup/on_shutdown прогоняются через run_until_complete (короткие),
+# startup_tasks — как долгоживущие задачи (_drain).
+bot.on_startup.append(_notify_startup())
+bot.on_shutdown.append(_cleanup_sessions())
+bot.startup_tasks.append(_idle_watchdog())
 
 # Единый список команд внутреннего хард-ресета (используется в двух местах ниже)
 HARD_RESET_COMMANDS = ["hard-reset", "убей сессию", "kill-session", "💀 hard reset"]
