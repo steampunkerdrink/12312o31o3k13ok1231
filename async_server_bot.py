@@ -80,6 +80,66 @@ async def _notify_startup():
 
 bot.on_startup.append(_notify_startup)
 
+
+def _close_session(user_id: int):
+    """Полностью закрыть PTY-сессию пользователя (без отправки сообщений)."""
+    session = user_sessions.pop(user_id, None)
+    shell_worker.session_tokens.pop(user_id, None)
+    shell_worker.last_activity.pop(user_id, None)
+    if session:
+        try:
+            session["task"].cancel()
+        except Exception:
+            pass
+        try:
+            os.close(session["master_fd"])
+        except Exception:
+            pass
+        try:
+            os.killpg(os.getpgid(session["process"].pid), signal.SIGKILL)
+        except Exception:
+            pass
+    shell_worker.user_interactive_mode[user_id] = False
+
+
+async def _idle_watchdog():
+    """Периодически закрывает простаивающие сессии. Порог — idle_timeout.txt (0 = выкл)."""
+    while True:
+        try:
+            timeout = config_manager.get_idle_timeout()
+            if timeout > 0:
+                now = time.time()
+                for uid in list(user_sessions.keys()):
+                    last = shell_worker.last_activity.get(uid, now)
+                    if now - last >= timeout:
+                        config_manager.log_message("INFO", f"Авто-закрытие простаивающей сессии {uid} (простой > {timeout} c)")
+                        _close_session(uid)
+                        try:
+                            await bot.api.messages.send(
+                                peer_id=uid,
+                                message=f"💤 Сессия закрыта из-за простоя (> {timeout} c).",
+                                random_id=0,
+                            )
+                        except Exception:
+                            pass
+        except Exception as e:
+            config_manager.log_message("ERROR", f"Ошибка idle-watchdog: {e}")
+        await asyncio.sleep(30)
+
+
+async def _cleanup_sessions():
+    """Аккуратное завершение: убить все дочерние PTY при остановке бота."""
+    for uid in list(user_sessions.keys()):
+        _close_session(uid)
+
+
+async def _start_background():
+    asyncio.create_task(_idle_watchdog())
+
+
+bot.on_startup.append(_start_background)
+bot.on_shutdown.append(_cleanup_sessions)
+
 # Единый список команд внутреннего хард-ресета (используется в двух местах ниже)
 HARD_RESET_COMMANDS = ["hard-reset", "убей сессию", "kill-session", "💀 hard reset"]
 
@@ -480,6 +540,7 @@ async def handle_message(message: Message):
         command = text_input
 
     shell_worker.user_interactive_mode[f"{user_id}_last_cmd"] = command
+    shell_worker.last_activity[user_id] = time.time()
     config_manager.log_message("INFO", f"Админ [{user_id}] отправил: {command}")
 
     # Если включён ART-режим — обычные команды шлём картинкой.

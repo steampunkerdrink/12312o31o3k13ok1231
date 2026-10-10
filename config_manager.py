@@ -8,9 +8,11 @@ SECRET_CONFIG_FILE = "bot_config.txt"
 KEYBOARD_TOGGLE_FILE = "keyboard_enable.txt"
 VERSION_FILE = "version.txt"
 INTERACTIVE_FILE = "interactive_list.txt"
+KEYBOARD_CUSTOM_FILE = "keyboard_custom.txt"
+IDLE_FILE = "idle_timeout.txt"
 
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.6.0"
+VERSION = "5.7.0"
 
 dynamic_commands_map = {}
 
@@ -101,6 +103,38 @@ def is_keyboard_enabled() -> bool:
         log_message("ERROR", f"Не удалось прочитать {KEYBOARD_TOGGLE_FILE}: {e}")
         return True
 
+def is_custom_keyboard_enabled() -> bool:
+    """Читает keyboard_custom.txt: показывать ли пользовательские кнопки (по умолчанию да)."""
+    if not os.path.exists(KEYBOARD_CUSTOM_FILE):
+        try:
+            with open(KEYBOARD_CUSTOM_FILE, "w", encoding="utf-8") as f: f.write("true")
+        except Exception as e:
+            log_message("ERROR", f"Не удалось создать {KEYBOARD_CUSTOM_FILE}: {e}")
+        return True
+    try:
+        with open(KEYBOARD_CUSTOM_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip().lower() == "true"
+    except Exception as e:
+        log_message("ERROR", f"Не удалось прочитать {KEYBOARD_CUSTOM_FILE}: {e}")
+        return True
+
+
+def get_idle_timeout() -> int:
+    """Секунды простоя до авто-закрытия сессии. 0 = выключено (по умолчанию 0)."""
+    if not os.path.exists(IDLE_FILE):
+        try:
+            with open(IDLE_FILE, "w", encoding="utf-8") as f: f.write("0")
+        except Exception as e:
+            log_message("ERROR", f"Не удалось создать {IDLE_FILE}: {e}")
+        return 0
+    try:
+        with open(IDLE_FILE, "r", encoding="utf-8") as f:
+            return max(0, int(float(f.read().strip())))
+    except Exception as e:
+        log_message("ERROR", f"Не удалось прочитать {IDLE_FILE}: {e}")
+        return 0
+
+
 def get_interactive_commands() -> list:
     """Считывает список интерактивных утилит из файла на лету."""
     default_cmds = ["ssh", "apt", "nano", "mysql", "ufw"]
@@ -154,6 +188,10 @@ def generate_dynamic_keyboard() -> str:
             lines = []
     else:
         lines = ["mytest (ssh test@test.com)", "mytest2 (pwd)"]
+
+    # Тоггл пользовательских кнопок: keyboard_custom.txt = false скрывает их (системный ряд остаётся)
+    if not is_custom_keyboard_enabled():
+        lines = []
 
     buttons_count = 0
     for line in lines:

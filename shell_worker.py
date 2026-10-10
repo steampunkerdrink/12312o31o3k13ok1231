@@ -1,6 +1,8 @@
 import asyncio
+import getpass
 import re
 import socket
+import time
 import config_manager
 from config_manager import log_message
 
@@ -19,6 +21,18 @@ last_valid_path = "/root"
 # Имя хоста для отображения промпта (не хардкодим конкретный сервер)
 HOSTNAME = socket.gethostname()
 
+# Реальный пользователь, под которым работает бот (не хардкодим root)
+try:
+    RUN_USER = getpass.getuser()
+except Exception:
+    RUN_USER = "user"
+
+# Строка shell-промпта: user@host:path# (или $ для non-root)
+PROMPT_RE = re.compile(r"^\s*[^\s@]+@[^\s:]+:.*[#$]\s*$")
+
+# Активность сессии (последнее событие) — для авто-закрытия простаивающих сессий
+last_activity = {}
+
 # Синтаксически корректный Regex для удаления ANSI-кодов цвета
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-9;?]*[a-zA-Z])')
 
@@ -30,8 +44,7 @@ def clean_terminal_garbage(text: str) -> str:
     lines = text.split("\n")
     cleaned_lines = []
     for line in lines:
-        stripped = line.strip()
-        if ("root@" in line and stripped.endswith("#")) or f"@{HOSTNAME}" in line or stripped.endswith("#") or "stty " in line or MARKER in line:
+        if PROMPT_RE.match(line) or "stty " in line or MARKER in line:
             continue
         cleaned_lines.append(line)
     return "\n".join(cleaned_lines).strip()
@@ -40,6 +53,7 @@ async def send_safe_message(api, peer_id: int, text: str, is_interactive: bool =
     """Нарезает длинный текст на куски и шлет в ВК порциями с адаптивным таймаутом"""
     global current_flood_multiplier
     if not text.strip(): return
+    last_activity[peer_id] = time.time()
     
     max_len = 3500
     chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)]
@@ -141,11 +155,13 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
 
                     fresh_ver = config_manager.get_version()
                     executed_command = user_interactive_mode.get(f"{user_id}_last_cmd", "command")
+                    prompt_char = "#" if RUN_USER == "root" else "$"
                     ec_suffix = "" if exit_code in ("", "0") else f" ⚠️ exit {exit_code}"
-                    path_header = f"📁 [v{fresh_ver}] root@{HOSTNAME}:{current_path}# {executed_command}{ec_suffix}"
+                    path_header = f"📁 [v{fresh_ver}] {RUN_USER}@{HOSTNAME}:{current_path}{prompt_char} {executed_command}{ec_suffix}"
 
                     if not _is_alive():
                         return
+                    last_activity[user_id] = time.time()
                     if clean_text:
                         full_package = f"{path_header}\n```\n{clean_text}\n```"
                         await api.messages.send(peer_id=user_id, message=full_package, keyboard=current_kb, random_id=0)
