@@ -114,21 +114,25 @@ async def run_as_art(user_id: int, command: str, message: Message):
         )
         return
 
-    # 2) Отправляем как фото (с таймаутом, чтобы не вешало)
-    try:
-        if hasattr(photo_uploader, "upload"):
-            attachment = await asyncio.wait_for(
-                photo_uploader.upload(file_source=upload_bytes, peer_id=user_id), timeout=30
-            )
-        else:
-            attachment = await asyncio.wait_for(
-                photo_uploader.upload_photos(file_source=upload_bytes, peer_id=user_id), timeout=30
-            )
-        await message.answer(attachment=attachment)
-        config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена фото")
-        return
-    except Exception as e_photo:
-        config_manager.log_message("WARNING", f"Фото-загрузка не удалась ({e_photo}); пробуем документ")
+    # 2) Отправляем как фото (несколько попыток + таймаут)
+    photo_err = None
+    for _attempt in range(1, 4):
+        try:
+            if hasattr(photo_uploader, "upload"):
+                attachment = await asyncio.wait_for(
+                    photo_uploader.upload(file_source=upload_bytes, peer_id=user_id), timeout=30
+                )
+            else:
+                attachment = await asyncio.wait_for(
+                    photo_uploader.upload_photos(file_source=upload_bytes, peer_id=user_id), timeout=30
+                )
+            await message.answer(attachment=attachment)
+            config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена фото")
+            return
+        except Exception as e_photo:
+            photo_err = e_photo
+            config_manager.log_message("WARNING", f"Фото-загрузка не удалась ({e_photo}); попытка {_attempt}/3")
+            await asyncio.sleep(1)
 
     # 3) Фолбэк: отправляем как документ (с таймаутом)
     if doc_uploader is not None:
@@ -138,20 +142,20 @@ async def run_as_art(user_id: int, command: str, message: Message):
             )
             config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена документом")
             await message.answer(
-                message=f"⚠️ Фото-загрузка не прошла ({e_photo}); отправил изображением.",
+                message=f"⚠️ Фото-загрузка не прошла ({photo_err}); отправил изображением.",
                 attachment=doc_attachment,
             )
             return
         except Exception as e_doc:
-            config_manager.log_message("ERROR", f"Фото: {e_photo}; документ: {e_doc}")
+            config_manager.log_message("ERROR", f"Фото: {photo_err}; документ: {e_doc}")
             await message.answer(
-                f"Не удалось отправить картинку (фото: {e_photo}; документ: {e_doc}).\n"
+                f"Не удалось отправить картинку (фото: {photo_err}; документ: {e_doc}).\n"
                 f"Сырой вывод:\n{raw.decode('utf-8', errors='replace')[-1500:]}"
             )
             return
 
     await message.answer(
-        f"Не удалось отправить картинку (фото: {e_photo}).\n"
+        f"Не удалось отправить картинку (фото: {photo_err}).\n"
         f"Сырой вывод:\n{raw.decode('utf-8', errors='replace')[-1500:]}"
     )
 
@@ -187,7 +191,11 @@ async def handle_message(message: Message):
 
     # ART-РЕЖИМ: выполнить команду и прислать результат картинкой (PNG)
     if text_input.lower().startswith("art:"):
-        await handle_art_command(user_id, text_input, message)
+        try:
+            await handle_art_command(user_id, text_input, message)
+        except Exception as e:
+            config_manager.log_message("ERROR", f"Ошибка art-обработки: {e}")
+            await message.answer(f"Ошибка при выполнении: {e}")
         return
 
     current_kb = config_manager.generate_dynamic_keyboard()
@@ -264,7 +272,11 @@ async def handle_message(message: Message):
 
     # Если включён ART-режим — выполняем команду и шлём результат картинкой
     if config_manager.art_mode:
-        await run_as_art(user_id, command, message)
+        try:
+            await run_as_art(user_id, command, message)
+        except Exception as e:
+            config_manager.log_message("ERROR", f"Ошибка art-обработки: {e}")
+            await message.answer(f"Ошибка при выполнении: {e}")
         return
 
     session_data = await get_or_create_session(user_id, bot.api)
