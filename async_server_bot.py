@@ -19,13 +19,13 @@ TOKEN, ALLOWED_ADMINS = config_manager.load_secret_config()
 bot = Bot(token=TOKEN)
 user_sessions = {}
 
-# Загрузчики для отрендеренных картинок. Имя "output.png" важно: VK распознаёт формат
-# по расширению файла, иначе PNG под именем .jpg может давать ошибку "photo is undefined".
+# Фото-загрузчик: дефолтное имя picture.jpg — именно с ним ls -la успешно загружалось фото.
+photo_uploader = _PhotoUploader(bot.api)
+# Фолбэк-загрузчик картинки как документа: имя .png, чтобы VK показывал его как изображение.
 try:
-    photo_uploader = _PhotoUploader(bot.api, attachment_name="output.png")
+    doc_uploader = _DocUploader(bot.api, attachment_name="output.png") if _DocUploader is not None else None
 except TypeError:
-    photo_uploader = _PhotoUploader(bot.api)
-doc_uploader = _DocUploader(bot.api) if _DocUploader is not None else None
+    doc_uploader = _DocUploader(bot.api) if _DocUploader is not None else None
 
 # Единый список команд внутреннего хард-ресета (используется в двух местах ниже)
 HARD_RESET_COMMANDS = ["hard-reset", "убей сессию", "kill-session", "💀 hard reset"]
