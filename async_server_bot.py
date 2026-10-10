@@ -114,21 +114,29 @@ async def run_as_art(user_id: int, command: str, message: Message):
         )
         return
 
-    # 2) Отправляем как фото
+    # 2) Отправляем как фото (с таймаутом, чтобы не вешало)
     try:
         if hasattr(photo_uploader, "upload"):
-            attachment = await photo_uploader.upload(file_source=upload_bytes, peer_id=user_id)
+            attachment = await asyncio.wait_for(
+                photo_uploader.upload(file_source=upload_bytes, peer_id=user_id), timeout=30
+            )
         else:
-            attachment = await photo_uploader.upload_photos(file_source=upload_bytes, peer_id=user_id)
+            attachment = await asyncio.wait_for(
+                photo_uploader.upload_photos(file_source=upload_bytes, peer_id=user_id), timeout=30
+            )
         await message.answer(attachment=attachment)
+        config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена фото")
         return
     except Exception as e_photo:
         config_manager.log_message("WARNING", f"Фото-загрузка не удалась ({e_photo}); пробуем документ")
 
-    # 3) Фолбэк: отправляем как документ (работает, если у токена есть право «Документы»)
+    # 3) Фолбэк: отправляем как документ (с таймаутом)
     if doc_uploader is not None:
         try:
-            doc_attachment = await doc_uploader.upload(file_source=upload_bytes, peer_id=user_id)
+            doc_attachment = await asyncio.wait_for(
+                doc_uploader.upload(file_source=upload_bytes, peer_id=user_id), timeout=30
+            )
+            config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена документом")
             await message.answer(
                 message=f"⚠️ Фото-загрузка не прошла ({e_photo}); отправил изображением.",
                 attachment=doc_attachment,
@@ -168,10 +176,12 @@ async def handle_message(message: Message):
     lower_text = text_input.lower()
     if lower_text in ["🖼 art", "art-mode"]:
         config_manager.art_mode = True
+        config_manager.log_message("INFO", f"Админ [{user_id}] включил ART-режим")
         await message.answer("🖼 ART-режим включён: команды приходят картинкой. Чтобы вернуть текст — нажми «📄 Текст».")
         return
     if lower_text in ["📄 текст", "text-mode", "textmode"]:
         config_manager.art_mode = False
+        config_manager.log_message("INFO", f"Админ [{user_id}] выключил ART-режим (текст)")
         await message.answer("📄 Текст-режим: команды приходят текстом (кроме «art: …»).")
         return
 
