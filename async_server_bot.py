@@ -4,6 +4,8 @@ import signal
 import config_manager
 import shell_worker
 import terminal_render
+from io import BytesIO
+from PIL import Image as _PILImage
 from vkbottle.bot import Bot, Message
 
 # Универсальная загрузка фото/документов: в vkbottle 4.7+ отдельные классы, раньше — MessageUploader
@@ -21,9 +23,9 @@ user_sessions = {}
 
 # Фото-загрузчик: дефолтное имя picture.jpg — именно с ним ls -la успешно загружалось фото.
 photo_uploader = _PhotoUploader(bot.api)
-# Фолбэк-загрузчик картинки как документа: имя .png, чтобы VK показывал его как изображение.
+# Фолбэк-загрузчик картинки как документа: имя .jpg, чтобы VK показывал его как изображение.
 try:
-    doc_uploader = _DocUploader(bot.api, attachment_name="output.png") if _DocUploader is not None else None
+    doc_uploader = _DocUploader(bot.api, attachment_name="output.jpg") if _DocUploader is not None else None
 except TypeError:
     doc_uploader = _DocUploader(bot.api) if _DocUploader is not None else None
 
@@ -97,9 +99,13 @@ async def run_as_art(user_id: int, command: str, message: Message):
         out = raw.decode("utf-8", errors="replace").strip()
         await message.answer(f"Команда вернула код {proc.returncode}:\n{out[-2000:]}")
         return
-    # 1) Рендерим PNG
+    # 1) Рендерим PNG и перекодируем в JPEG (фото-сервер VK надёжнее принимает JPEG)
     try:
         png = terminal_render.render(raw)
+        img = _PILImage.open(BytesIO(png)).convert("RGB")
+        jpeg_buf = BytesIO()
+        img.save(jpeg_buf, format="JPEG", quality=90)
+        upload_bytes = jpeg_buf.getvalue()
     except Exception as e:
         config_manager.log_message("ERROR", f"Ошибка рендера art-вывода: {e}")
         await message.answer(
@@ -111,9 +117,9 @@ async def run_as_art(user_id: int, command: str, message: Message):
     # 2) Отправляем как фото
     try:
         if hasattr(photo_uploader, "upload"):
-            attachment = await photo_uploader.upload(file_source=png, peer_id=user_id)
+            attachment = await photo_uploader.upload(file_source=upload_bytes, peer_id=user_id)
         else:
-            attachment = await photo_uploader.upload_photos(file_source=png, peer_id=user_id)
+            attachment = await photo_uploader.upload_photos(file_source=upload_bytes, peer_id=user_id)
         await message.answer(attachment=attachment)
         return
     except Exception as e_photo:
@@ -122,7 +128,7 @@ async def run_as_art(user_id: int, command: str, message: Message):
     # 3) Фолбэк: отправляем как документ (работает, если у токена есть право «Документы»)
     if doc_uploader is not None:
         try:
-            doc_attachment = await doc_uploader.upload(file_source=png, peer_id=user_id)
+            doc_attachment = await doc_uploader.upload(file_source=upload_bytes, peer_id=user_id)
             await message.answer(
                 message=f"⚠️ Фото-загрузка не прошла ({e_photo}); отправил изображением.",
                 attachment=doc_attachment,
