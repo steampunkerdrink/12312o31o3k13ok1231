@@ -1,9 +1,10 @@
 import asyncio
 import re
-from datetime import datetime
+import socket
 import config_manager
+from config_manager import log_message
 
-VERSION = "5.2.1"
+VERSION = config_manager.VERSION
 MARKER = "___END_OF_COMMAND___"
 user_interactive_mode = {}
 current_flood_multiplier = 1.0
@@ -11,17 +12,11 @@ current_flood_multiplier = 1.0
 # ИСПРАВЛЕНО (v5.2.1): Кэш путей теперь монолитно живёт здесь, решая проблему Circular Import!
 last_valid_path = "/root"
 
+# Имя хоста для отображения промпта (не хардкодим конкретный сервер)
+HOSTNAME = socket.gethostname()
+
 # Синтаксически корректный Regex для удаления ANSI-кодов цвета
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-9;?]*[a-zA-Z])')
-
-def log_message(level: str, message: str):
-    """Кастомный безопасный логер"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f"{timestamp} [{level}] {message}"
-    print(log_line, flush=True)
-    try:
-        with open("bot_server.log", "a", encoding="utf-8") as f: f.write(log_line + "\n")
-    except: pass
 
 def clean_terminal_garbage(text: str) -> str:
     """Очищает вывод от ANSI-кодов и скрытых системных хвостов PTY"""
@@ -32,7 +27,7 @@ def clean_terminal_garbage(text: str) -> str:
     cleaned_lines = []
     for line in lines:
         stripped = line.strip()
-        if ("root@" in line and stripped.endswith("#")) or "@v2858132" in line or stripped.endswith("#") or "stty " in line or MARKER in line:
+        if ("root@" in line and stripped.endswith("#")) or f"@{HOSTNAME}" in line or stripped.endswith("#") or "stty " in line or MARKER in line:
             continue
         cleaned_lines.append(line)
     return "\n".join(cleaned_lines).strip()
@@ -69,6 +64,7 @@ async def send_safe_message(api, peer_id: int, text: str, is_interactive: bool =
                     await asyncio.sleep(base_delay * current_flood_multiplier)
                     continue
                 else:
+                    log_message("ERROR", f"Не-флуд ошибка отправки сообщения для {peer_id}: {e}")
                     await asyncio.sleep(2.0)
                     break
 
@@ -131,7 +127,7 @@ async def start_output_listener(user_id: int, process_reader, api, process):
 
                     fresh_ver = config_manager.get_version()
                     executed_command = user_interactive_mode.get(f"{user_id}_last_cmd", "command")
-                    path_header = f"📁 [v{fresh_ver}] root@v2858132:{current_path}# {executed_command}"
+                    path_header = f"📁 [v{fresh_ver}] root@{HOSTNAME}:{current_path}# {executed_command}"
 
                     if clean_text:
                         full_package = f"{path_header}\n```\n{clean_text}\n```"

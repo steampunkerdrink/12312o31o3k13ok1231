@@ -5,18 +5,21 @@ import config_manager
 import shell_worker
 from vkbottle.bot import Bot, Message
 
-VERSION = "5.3.0"
+VERSION = config_manager.VERSION
 TOKEN, ALLOWED_ADMINS = config_manager.load_secret_config()
 
 bot = Bot(token=TOKEN)
 user_sessions = {}
+
+# Единый список команд внутреннего хард-ресета (используется в двух местах ниже)
+HARD_RESET_COMMANDS = ["hard-reset", "убей сессию", "kill-session", "💀 hard reset"]
 
 async def get_or_create_session(user_id: int, api):
     if user_id in user_sessions:
         session = user_sessions[user_id]
         if session["process"].returncode is None: return session
 
-    shell_worker.log_message("INFO", f"Запуск новой интерактивной bash-сессии для ID {user_id}")
+    config_manager.log_message("INFO", f"Запуск новой интерактивной bash-сессии для ID {user_id}")
     
     master_fd, slave_fd = os.openpty()
     process = await asyncio.create_subprocess_exec(
@@ -30,7 +33,7 @@ async def get_or_create_session(user_id: int, api):
     await loop.connect_read_pipe(lambda: protocol, os.fdopen(master_fd, "rb"))
     
     writer_transport, writer_protocol = await loop.connect_write_pipe(
-        lambda: asyncio.streams.FlowControlMixin(), os.fdopen(master_fd, "wb")
+        lambda: asyncio.streams.FlowControlMixin(), os.fdopen(os.dup(master_fd), "wb")
     )
     writer = asyncio.StreamWriter(writer_transport, writer_protocol, process_reader, loop)
 
@@ -57,13 +60,17 @@ async def handle_message(message: Message):
     if not text_input: return
 
     if user_id not in ALLOWED_ADMINS:
-        shell_worker.log_message("WARNING", f"Попытка доступа от неавторизованного ID {user_id}.")
+        config_manager.log_message("WARNING", f"Попытка доступа от неавторизованного ID {user_id}.")
         return
 
     current_kb = config_manager.generate_dynamic_keyboard()
 
     # СТАНДАРТНЫЙ СБРОС (v5.3.0)
-    if "сброс" in text_input.lower() or "reset" in text_input.lower() or text_input.lower() == "exit":
+    # Исключаем хард-ресет: иначе подстрока "reset" в "💀 hard reset" (текст кнопки
+    # Hard Reset) срабатывала бы обычным сбросом раньше, чем внутренний хард-ресет.
+    lower_text = text_input.lower()
+    is_hard_reset = lower_text in HARD_RESET_COMMANDS
+    if not is_hard_reset and ("сброс" in lower_text or "reset" in lower_text or lower_text == "exit"):
         if user_id in user_sessions:
             session = user_sessions[user_id]
             session["task"].cancel()
@@ -81,7 +88,7 @@ async def handle_message(message: Message):
         return
 
     # ВНУТРЕННИЙ ХАРД-РЕСЕТ СЕССИИ (v5.3.0)
-    if text_input.lower() in ["hard-reset", "убей сессию", "kill-session", "💀 hard reset"]:
+    if text_input.lower() in HARD_RESET_COMMANDS:
         if user_id in user_sessions:
             session = user_sessions[user_id]
             session["task"].cancel()
@@ -102,7 +109,7 @@ async def handle_message(message: Message):
 
     if text_input.lower() in ["turbo", "турбо", "⚡ турбо"]:
         shell_worker.current_flood_multiplier = 1.0
-        shell_worker.log_message("INFO", f"Админ [{user_id}] вручную сбросил штрафной множитель задержки в 1.0")
+        config_manager.log_message("INFO", f"Админ [{user_id}] вручную сбросил штрафной множитель задержки в 1.0")
         await message.answer("⚡ Коэффициент флуд-контроля ВК принудительно сброшен на 1.0!")
         return
 
@@ -110,12 +117,12 @@ async def handle_message(message: Message):
     if "ctrl" in text_input.lower() or "сигнал" in text_input.lower() or "ctrl+c" in text_input.lower():
         if user_id in user_sessions and user_sessions[user_id]["process"].returncode is None:
             session = user_sessions[user_id]
-            shell_worker.log_message("INFO", f"Админ [{user_id}] шлет физический сигнал Ctrl+C")
+            config_manager.log_message("INFO", f"Админ [{user_id}] шлет физический сигнал Ctrl+C")
             
             try:
                 os.write(session["master_fd"], b"\x03")
             except Exception as e_signal:
-                shell_worker.log_message("ERROR", f"Сбой отправки байта прерывания: {e_signal}")
+                config_manager.log_message("ERROR", f"Сбой отправки байта прерывания: {e_signal}")
                 
             shell_worker.user_interactive_mode[f"{user_id}_last_cmd"] = "SIGINT (Ctrl+C)"
         return
@@ -126,7 +133,7 @@ async def handle_message(message: Message):
         command = text_input
 
     shell_worker.user_interactive_mode[f"{user_id}_last_cmd"] = command
-    shell_worker.log_message("INFO", f"Админ [{user_id}] отправил: {command}")
+    config_manager.log_message("INFO", f"Админ [{user_id}] отправил: {command}")
     session_data = await get_or_create_session(user_id, bot.api)
     writer = session_data["writer"]
 
@@ -140,7 +147,7 @@ async def handle_message(message: Message):
             if is_interactive:
                 shell_worker.user_interactive_mode[user_id] = True
                 full_command = f"{command}\n"
-                shell_worker.log_message("INFO", f"Включен интерактивный режим для команды: {command}")
+                config_manager.log_message("INFO", f"Включен интерактивный режим для команды: {command}")
             else:
                 full_command = command + "\necho ''\necho \"___END_OF_COMMAND___:\"$(pwd)\n"
                 
@@ -152,5 +159,5 @@ async def handle_message(message: Message):
 
 if __name__ == "__main__":
     current_ver = config_manager.get_version()
-    shell_worker.log_message("INFO", f"Запуск модульного безопасного СТРИМ-CLI-бота (v{VERSION})...")
+    config_manager.log_message("INFO", f"Запуск модульного безопасного СТРИМ-CLI-бота (v{VERSION})...")
     bot.run()
