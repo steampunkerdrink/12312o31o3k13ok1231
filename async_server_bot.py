@@ -296,8 +296,10 @@ async def handle_message(message: Message):
     shell_worker.user_interactive_mode[f"{user_id}_last_cmd"] = command
     config_manager.log_message("INFO", f"Админ [{user_id}] отправил: {command}")
 
-    # Если включён ART-режим — выполняем команду и шлём результат картинкой
-    if config_manager.art_mode:
+    # Если включён ART-режим — обычные команды шлём картинкой.
+    # Исключение: интерактивные команды (ssh, apt, nano, mysql, ufw…) всё равно
+    # идут в живую PTY-сессию, чтобы работать интерактивно (у art-подпроцесса лимит 120c).
+    if config_manager.art_mode and not config_manager.is_command_interactive(command):
         try:
             await run_as_art(user_id, command, message)
         except Exception as e:
