@@ -14,6 +14,10 @@ VERSION = "5.3.0"
 
 dynamic_commands_map = {}
 
+# Глобальный переключатель «art-режима»: если True — обычные команды бот присылает
+# картинкой (PNG). Управляется кнопками на клавиатуре.
+art_mode = False
+
 
 def log_message(level: str, message: str):
     """Единый логгер проекта: метка времени, stdout + файл bot_server.log"""
@@ -176,5 +180,10 @@ def generate_dynamic_keyboard() -> str:
     kb.add(Text("📴 Off"), color=KeyboardButtonColor.SECONDARY)
     kb.add(Text("💀 Hard Reset"), color=KeyboardButtonColor.SECONDARY) # Белая кнопка спасения
     kb.add(Text("🔄 Reset"), color=KeyboardButtonColor.NEGATIVE)
-    
+
+    # Переключатели режима вывода: картинкой (ART) или текстом (Текст)
+    kb.row()
+    kb.add(Text("🖼 ART"), color=KeyboardButtonColor.SECONDARY)
+    kb.add(Text("📄 Текст"), color=KeyboardButtonColor.SECONDARY)
+
     return kb.get_json()

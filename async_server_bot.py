@@ -3,13 +3,23 @@ import os
 import signal
 import config_manager
 import shell_worker
+import terminal_render
 from vkbottle.bot import Bot, Message
+
+# Универсальная загрузка фото: в vkbottle 4.7+ класс PhotoMessageUploader, раньше — MessageUploader
+try:
+    from vkbottle import PhotoMessageUploader as _PhotoUploader
+except ImportError:
+    from vkbottle import MessageUploader as _PhotoUploader
 
 VERSION = config_manager.VERSION
 TOKEN, ALLOWED_ADMINS = config_manager.load_secret_config()
 
 bot = Bot(token=TOKEN)
 user_sessions = {}
+
+# Для отправки отрендеренных картинок в VK
+photo_uploader = _PhotoUploader(bot.api)
 
 # Единый список команд внутреннего хард-ресета (используется в двух местах ниже)
 HARD_RESET_COMMANDS = ["hard-reset", "убей сессию", "kill-session", "💀 hard reset"]
@@ -53,6 +63,55 @@ async def get_or_create_session(user_id: int, api):
     await writer.drain()
     return user_sessions[user_id]
 
+async def run_as_art(user_id: int, command: str, message: Message):
+    """Выполняет команду в текущей папке сессии и присылает результат картинкой (PNG)."""
+    if not command:
+        await message.answer("Пустая команда. Пример: art: qrencode -t ansiutf8 https://...")
+        return
+    config_manager.log_message("INFO", f"Админ [{user_id}] art-выполнение: {command}")
+    full = f"cd {shell_worker.last_valid_path} && {command}"
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            full, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        )
+        raw, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        await message.answer("Команда выполнялась дольше 120 c — прервано.")
+        return
+    except Exception as e:
+        config_manager.log_message("ERROR", f"art-команда не выполнилась: {e}")
+        await message.answer(f"Ошибка выполнения: {e}")
+        return
+    raw = raw or b""
+    if proc.returncode != 0:
+        out = raw.decode("utf-8", errors="replace").strip()
+        await message.answer(f"Команда вернула код {proc.returncode}:\n{out[-2000:]}")
+        return
+    try:
+        png = terminal_render.render(raw)
+        if hasattr(photo_uploader, "upload"):
+            attachment = await photo_uploader.upload(file_source=png, peer_id=user_id)
+        else:
+            attachment = await photo_uploader.upload_photos(file_source=png, peer_id=user_id)
+        await message.answer(attachment=attachment)
+    except Exception as e:
+        config_manager.log_message("ERROR", f"Ошибка рендера/загрузки art-вывода: {e}")
+        await message.answer(
+            f"Не удалось отрисовать картинку: {e}\nСырой вывод:\n"
+            + raw.decode("utf-8", errors="replace")[-2000:]
+        )
+
+
+async def handle_art_command(user_id: int, text: str, message: Message):
+    """Обработчик префикса «art:» — всегда рендерит результат картинкой."""
+    cmd = text.split(":", 1)[1].strip()
+    await run_as_art(user_id, cmd, message)
+
+
 @bot.on.message()
 async def handle_message(message: Message):
     user_id = message.from_id
@@ -61,6 +120,22 @@ async def handle_message(message: Message):
 
     if user_id not in ALLOWED_ADMINS:
         config_manager.log_message("WARNING", f"Попытка доступа от неавторизованного ID {user_id}.")
+        return
+
+    # Переключение режима вывода: картинкой (ART) или текстом
+    lower_text = text_input.lower()
+    if lower_text in ["🖼 art", "art-mode"]:
+        config_manager.art_mode = True
+        await message.answer("🖼 ART-режим включён: команды приходят картинкой. Чтобы вернуть текст — нажми «📄 Текст».")
+        return
+    if lower_text in ["📄 текст", "text-mode", "textmode"]:
+        config_manager.art_mode = False
+        await message.answer("📄 Текст-режим: команды приходят текстом (кроме «art: …»).")
+        return
+
+    # ART-РЕЖИМ: выполнить команду и прислать результат картинкой (PNG)
+    if text_input.lower().startswith("art:"):
+        await handle_art_command(user_id, text_input, message)
         return
 
     current_kb = config_manager.generate_dynamic_keyboard()
@@ -134,6 +209,12 @@ async def handle_message(message: Message):
 
     shell_worker.user_interactive_mode[f"{user_id}_last_cmd"] = command
     config_manager.log_message("INFO", f"Админ [{user_id}] отправил: {command}")
+
+    # Если включён ART-режим — выполняем команду и шлём результат картинкой
+    if config_manager.art_mode:
+        await run_as_art(user_id, command, message)
+        return
+
     session_data = await get_or_create_session(user_id, bot.api)
     writer = session_data["writer"]
 
