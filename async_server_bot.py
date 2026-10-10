@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import signal
 import config_manager
@@ -14,6 +15,31 @@ try:
 except ImportError:
     from vkbottle import MessageUploader as _PhotoUploader
     _DocUploader = None
+
+_mirrored = False
+
+
+def _mirror_logging_to_file() -> None:
+    """Дублирует логи/ошибки vkbottle (модуль logging) в bot_server.log.
+
+    Раньше трейсбеки падали только в journalctl/systemd; здесь цепляем обработчик
+    на корневой логгер, чтобы всё писало ещё и в наш файл.
+    """
+    global _mirrored
+    if _mirrored:
+        return
+    _mirrored = True
+    try:
+        root = logging.getLogger()
+        handler = logging.FileHandler("bot_server.log", encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        root.addHandler(handler)
+        root.setLevel(logging.INFO)
+    except Exception as e:
+        print(f"[mirror] Не удалось настроить файловый лог: {e}", flush=True)
+
+
+_mirror_logging_to_file()
 
 VERSION = config_manager.VERSION
 TOKEN, ALLOWED_ADMINS = config_manager.load_secret_config()
