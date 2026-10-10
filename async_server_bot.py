@@ -123,7 +123,10 @@ async def run_as_art(user_id: int, command: str, message: Message):
     if doc_uploader is not None:
         try:
             doc_attachment = await doc_uploader.upload(file_source=png, peer_id=user_id)
-            await message.answer(attachment=doc_attachment)
+            await message.answer(
+                message=f"⚠️ Фото-загрузка не прошла ({e_photo}); отправил изображением.",
+                attachment=doc_attachment,
+            )
             return
         except Exception as e_doc:
             config_manager.log_message("ERROR", f"Фото: {e_photo}; документ: {e_doc}")
