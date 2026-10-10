@@ -120,7 +120,34 @@ def _read_mem():
     return None
 
 
-def build_status_text(user_id: int) -> str:
+def _read_cpu_times():
+    """(total, idle) тиков CPU из /proc/stat. None при недоступности."""
+    try:
+        with open("/proc/stat", encoding="utf-8") as f:
+            parts = [int(x) for x in f.readline().split()[1:]]
+        idle = parts[3] + (parts[4] if len(parts) > 4 else 0)  # idle + iowait
+        return sum(parts), idle
+    except Exception:
+        return None
+
+
+async def _cpu_percent(interval: float = 0.3):
+    """Загрузка CPU в процентах: два замера /proc/stat с паузой."""
+    first = _read_cpu_times()
+    if not first:
+        return None
+    await asyncio.sleep(interval)
+    second = _read_cpu_times()
+    if not second:
+        return None
+    d_total = second[0] - first[0]
+    d_idle = second[1] - first[1]
+    if d_total <= 0:
+        return None
+    return max(0.0, min(100.0, (1 - d_idle / d_total) * 100))
+
+
+async def build_status_text(user_id: int) -> str:
     """Собирает статус: бот + сессия + сервер. Каждая метрика — best-effort (н/д при сбое)."""
     lines = [f"📊 Статус бота [v{config_manager.get_version()}]"]
 
@@ -172,9 +199,11 @@ def build_status_text(user_id: int) -> str:
         disk_s = f"{_fmt_bytes(du.used)}/{_fmt_bytes(du.total)}"
     except Exception:
         disk_s = "н/д"
-    cpu = os.cpu_count() or "н/д"
-    lines.append(f"🌐 Сервер: {host} | user {run_user} | CPU {cpu} | uptime {server_up}")
-    lines.append(f"   load {load} | RAM {mem_s} | диск {disk_s}")
+    cores = os.cpu_count() or "н/д"
+    cpu_pct = await _cpu_percent()
+    cpu_s = f"{cpu_pct:.0f}%" if cpu_pct is not None else "н/д"
+    lines.append(f"🌐 Сервер: {host} | user {run_user} | uptime {server_up}")
+    lines.append(f"   CPU {cpu_s} ({cores} ядер) | load {load} | RAM {mem_s} | диск {disk_s}")
     return "\n".join(lines)
 
 
@@ -342,7 +371,7 @@ async def handle_message(message: Message):
     # СТАТУС: диагностика бота, сессии и сервера
     if lower_text in ["status", "статус", "📊 статус"]:
         try:
-            await message.answer(build_status_text(user_id))
+            await message.answer(await build_status_text(user_id))
         except Exception as e:
             config_manager.log_message("ERROR", f"Ошибка статуса: {e}")
             await message.answer(f"Ошибка статуса: {e}")

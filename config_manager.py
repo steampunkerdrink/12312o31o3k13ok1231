@@ -10,7 +10,7 @@ VERSION_FILE = "version.txt"
 INTERACTIVE_FILE = "interactive_list.txt"
 
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.5.0"
+VERSION = "5.5.1"
 
 dynamic_commands_map = {}
 
