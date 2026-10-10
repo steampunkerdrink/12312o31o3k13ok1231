@@ -133,28 +133,43 @@ def _parse(text: str):
     return rows
 
 
-def _render_art(rows, cell=8):
+def _cell_fill(ch: str):
+    """Возвращает (top, bottom) — заполнение верхней/нижней половины ячейки.
+
+    `qrencode -t ansiutf8` кладёт в одну текстовую ячейку ДВА модуля QR по вертикали
+    (полублоки ▀/▄/█), поэтому ячейка = 1 модуль в ширину × 2 модуля в высоту.
+    """
+    if ch in (" ", "\t", ""):
+        return (False, False)
+    if ch == "▀":
+        return (True, False)
+    if ch == "▄":
+        return (False, True)
+    return (True, True)  # █ и прочие — заполняем полностью
+
+
+def _render_art(rows, cell=12):
     ncols = max((len(r) for r in rows), default=0)
     nrows = len(rows)
     if ncols == 0 or nrows == 0:
         return Image.new("RGB", (4, 4), DEFAULT_BG)
-    w, h = ncols * 2 * cell, nrows * 2 * cell
+    w, h = ncols * cell, nrows * 2 * cell
     img = Image.new("RGB", (w, h), DEFAULT_BG)
     draw = ImageDraw.Draw(img)
     y = 0
     for row in rows:
         x = 0
         for cellobj in row:
-            cov = BLOCK_COVERAGE.get(cellobj.char, {0, 1, 2, 3})
-            for idx in range(4):
-                sx, sy = idx % 2, idx // 2
-                color = cellobj.fg if idx in cov else cellobj.bg
-                draw.rectangle(
-                    [x + sx * cell, y + sy * cell,
-                     x + (sx + 1) * cell - 1, y + (sy + 1) * cell - 1],
-                    fill=color,
-                )
-            x += 2 * cell
+            top, bottom = _cell_fill(cellobj.char)
+            draw.rectangle(
+                [x, y, x + cell - 1, y + cell - 1],
+                fill=cellobj.fg if top else cellobj.bg,
+            )
+            draw.rectangle(
+                [x, y + cell, x + cell - 1, y + 2 * cell - 1],
+                fill=cellobj.fg if bottom else cellobj.bg,
+            )
+            x += cell
         y += 2 * cell
     return img
 
