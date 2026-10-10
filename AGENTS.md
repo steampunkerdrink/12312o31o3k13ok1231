@@ -93,6 +93,9 @@
 - **Глобальные переменные-состояние** живут в `shell_worker.py` (это осознанное
   решение против circular-import): `user_interactive_mode`,
   `current_flood_multiplier`, `last_valid_path`.
+- **Токены сессий**: `shell_worker.session_tokens[user_id]` — уникальный токен
+  активного слушателя. При `reset`/`hard-reset` он снимается, поэтому «старый»
+  слушатель не пришлёт запоздалый вывод уже после сброса.
 
 ---
 
@@ -116,7 +119,7 @@
 
 - **Язык**: комментарии и логи сообщений — **русский**. Тексты для пользователя
   в VK — тоже русский.
-- **Версионирование**: единый источник — `VERSION = "5.4.4"` в `config_manager.py`.
+- **Версионирование**: единый источник — `VERSION = "5.4.5"` в `config_manager.py`.
   `async_server_bot.py` и `shell_worker.py` используют
   `VERSION = config_manager.VERSION`. Файл `version.txt` читается `get_version()`
   на лету и может переопределять версию, показанную в заголовках путей.

@@ -81,8 +81,12 @@ async def get_or_create_session(user_id: int, api):
     )
     writer = asyncio.StreamWriter(writer_transport, writer_protocol, process_reader, loop)
 
-    listen_task = asyncio.create_task(shell_worker.start_output_listener(user_id, process_reader, api, process))
-    
+    token = object()
+    shell_worker.session_tokens[user_id] = token
+    listen_task = asyncio.create_task(
+        shell_worker.start_output_listener(user_id, process_reader, api, process, token)
+    )
+
     user_sessions[user_id] = {
         "process": process, 
         "writer": writer, 
@@ -235,6 +239,7 @@ async def handle_message(message: Message):
         if user_id in user_sessions:
             session = user_sessions[user_id]
             session["task"].cancel()
+            shell_worker.session_tokens.pop(user_id, None)
             await asyncio.sleep(0.1)
             try: os.close(session["master_fd"])
             except: pass
@@ -253,6 +258,7 @@ async def handle_message(message: Message):
         if user_id in user_sessions:
             session = user_sessions[user_id]
             session["task"].cancel()
+            shell_worker.session_tokens.pop(user_id, None)
             await asyncio.sleep(0.05)
             try:
                 os.killpg(os.getpgid(session["process"].pid), signal.SIGKILL)

@@ -9,6 +9,10 @@ MARKER = "___END_OF_COMMAND___"
 user_interactive_mode = {}
 current_flood_multiplier = 1.0
 
+# Токен активного слушателя на пользователя. При reset/hard-reset меняется/снимается,
+# чтобы «старый» фоновый слушатель перестал слать вывод после сброса.
+session_tokens = {}
+
 # ИСПРАВЛЕНО (v5.2.1): Кэш путей теперь монолитно живёт здесь, решая проблему Circular Import!
 last_valid_path = "/root"
 
@@ -68,11 +72,16 @@ async def send_safe_message(api, peer_id: int, text: str, is_interactive: bool =
                     await asyncio.sleep(2.0)
                     break
 
-async def start_output_listener(user_id: int, process_reader, api, process):
+async def start_output_listener(user_id: int, process_reader, api, process, token=None):
     """Фоновый слушатель логов v5.2.1 (Исправлено сохранение путей и выгрузка статистики)"""
     global last_valid_path
     log_message("INFO", f"Запущено фоновое чтение PTY для пользователя {user_id} (v{VERSION})")
-    
+
+    def _is_alive():
+        # Сессия актуальна, только если её токен всё ещё закреплён за user_id.
+        # После reset/hard-reset токен меняется — старый слушатель больше не шлёт.
+        return token is None or session_tokens.get(user_id) is token
+
     buffer = []
     last_send_time = asyncio.get_event_loop().time()
     was_cancelled = False
@@ -129,6 +138,8 @@ async def start_output_listener(user_id: int, process_reader, api, process):
                     executed_command = user_interactive_mode.get(f"{user_id}_last_cmd", "command")
                     path_header = f"📁 [v{fresh_ver}] root@{HOSTNAME}:{current_path}# {executed_command}"
 
+                    if not _is_alive():
+                        return
                     if clean_text:
                         full_package = f"{path_header}\n```\n{clean_text}\n```"
                         await api.messages.send(peer_id=user_id, message=full_package, keyboard=current_kb, random_id=0)
@@ -155,7 +166,7 @@ async def start_output_listener(user_id: int, process_reader, api, process):
                         buffer.clear()
                         
                         clean_chunk = clean_terminal_garbage(raw_chunk)
-                        if clean_chunk:
+                        if clean_chunk and _is_alive():
                             await send_safe_message(api, user_id, clean_chunk, is_interactive=is_active_interactive)
                             last_send_time = asyncio.get_event_loop().time()
                 
@@ -166,6 +177,6 @@ async def start_output_listener(user_id: int, process_reader, api, process):
     finally:
         if was_cancelled:
             buffer.clear()
-        elif buffer:
+        elif buffer and _is_alive():
             await send_safe_message(api, user_id, clean_terminal_garbage("".join(buffer)), is_interactive=user_interactive_mode.get(user_id, False))
         log_message("INFO", f"Фоновое чтение для {user_id} завершено.")
