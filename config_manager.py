@@ -10,7 +10,7 @@ VERSION_FILE = "version.txt"
 INTERACTIVE_FILE = "interactive_list.txt"
 
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.4.5"
+VERSION = "5.5.0"
 
 dynamic_commands_map = {}
 
@@ -185,5 +185,6 @@ def generate_dynamic_keyboard() -> str:
     kb.row()
     kb.add(Text("🖼 ART"), color=KeyboardButtonColor.SECONDARY)
     kb.add(Text("📄 Текст"), color=KeyboardButtonColor.SECONDARY)
+    kb.add(Text("📊 Статус"), color=KeyboardButtonColor.SECONDARY)
 
     return kb.get_json()

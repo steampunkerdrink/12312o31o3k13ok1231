@@ -1,7 +1,10 @@
 import asyncio
+import getpass
 import logging
 import os
+import shutil
 import signal
+import time
 import config_manager
 import shell_worker
 import terminal_render
@@ -42,6 +45,7 @@ def _mirror_logging_to_file() -> None:
 _mirror_logging_to_file()
 
 VERSION = config_manager.VERSION
+START_TIME = time.time()
 TOKEN, ALLOWED_ADMINS = config_manager.load_secret_config()
 
 bot = Bot(token=TOKEN)
@@ -57,6 +61,122 @@ except TypeError:
 
 # Единый список команд внутреннего хард-ресета (используется в двух местах ниже)
 HARD_RESET_COMMANDS = ["hard-reset", "убей сессию", "kill-session", "💀 hard reset"]
+
+def _fmt_bytes(n: float) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PiB"
+
+
+def _fmt_dur(seconds: float) -> str:
+    seconds = int(seconds)
+    d, seconds = divmod(seconds, 86400)
+    h, seconds = divmod(seconds, 3600)
+    m = seconds // 60
+    parts = []
+    if d:
+        parts.append(f"{d}d")
+    if h:
+        parts.append(f"{h}h")
+    if m:
+        parts.append(f"{m}m")
+    return " ".join(parts) if parts else "<1m"
+
+
+def _read_proc_uptime():
+    try:
+        with open("/proc/uptime", encoding="utf-8") as f:
+            return float(f.read().split()[0])
+    except Exception:
+        return None
+
+
+def _read_loadavg():
+    try:
+        with open("/proc/loadavg", encoding="utf-8") as f:
+            p = f.read().split()
+        return f"{p[0]} {p[1]} {p[2]}"
+    except Exception:
+        return None
+
+
+def _read_mem():
+    total = avail = None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1]) * 1024
+                elif line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1]) * 1024
+                if total and avail:
+                    break
+        if total and avail:
+            return total - avail, total
+    except Exception:
+        pass
+    return None
+
+
+def build_status_text(user_id: int) -> str:
+    """Собирает статус: бот + сессия + сервер. Каждая метрика — best-effort (н/д при сбое)."""
+    lines = [f"📊 Статус бота [v{config_manager.get_version()}]"]
+
+    # Бот
+    try:
+        up = _fmt_dur(time.time() - START_TIME)
+    except Exception:
+        up = "н/д"
+    try:
+        mode = "🖼 ART" if config_manager.art_mode else "📄 Текст"
+    except Exception:
+        mode = "н/д"
+    try:
+        kb = "вкл" if config_manager.is_keyboard_enabled() else "выкл"
+    except Exception:
+        kb = "н/д"
+    try:
+        delay = config_manager.get_dynamic_delay()
+    except Exception:
+        delay = "н/д"
+    flood = shell_worker.current_flood_multiplier
+    lines.append(f"🤖 Бот: uptime {up} | режим {mode} | клавиатура {kb} | задержка {delay}с | флуд ×{flood:.1f}")
+
+    # Сессия
+    sess = user_sessions.get(user_id)
+    if sess and sess["process"].returncode is None:
+        inter = "интерактивный" if shell_worker.user_interactive_mode.get(user_id, False) else "обычный"
+        last = shell_worker.user_interactive_mode.get(f"{user_id}_last_cmd", "—")
+        lines.append(
+            f"🖥️ Сессия: активна (PID {sess['process'].pid}) | папка {shell_worker.last_valid_path} "
+            f"| {inter} | последняя: {last}"
+        )
+    else:
+        lines.append("🖥️ Сессия: не активна")
+
+    # Сервер (всё best-effort)
+    try:
+        run_user = getpass.getuser()
+    except Exception:
+        run_user = "н/д"
+    host = getattr(shell_worker, "HOSTNAME", "н/д")
+    upt = _read_proc_uptime()
+    server_up = _fmt_dur(upt) if upt else "н/д"
+    load = _read_loadavg() or "н/д"
+    mem = _read_mem()
+    mem_s = f"{_fmt_bytes(mem[0])}/{_fmt_bytes(mem[1])}" if mem else "н/д"
+    try:
+        du = shutil.disk_usage("/")
+        disk_s = f"{_fmt_bytes(du.used)}/{_fmt_bytes(du.total)}"
+    except Exception:
+        disk_s = "н/д"
+    cpu = os.cpu_count() or "н/д"
+    lines.append(f"🌐 Сервер: {host} | user {run_user} | CPU {cpu} | uptime {server_up}")
+    lines.append(f"   load {load} | RAM {mem_s} | диск {disk_s}")
+    return "\n".join(lines)
+
 
 async def get_or_create_session(user_id: int, api):
     if user_id in user_sessions:
@@ -217,6 +337,15 @@ async def handle_message(message: Message):
         config_manager.art_mode = False
         config_manager.log_message("INFO", f"Админ [{user_id}] выключил ART-режим (текст)")
         await message.answer("📄 Текст-режим: команды приходят текстом (кроме «art: …»).")
+        return
+
+    # СТАТУС: диагностика бота, сессии и сервера
+    if lower_text in ["status", "статус", "📊 статус"]:
+        try:
+            await message.answer(build_status_text(user_id))
+        except Exception as e:
+            config_manager.log_message("ERROR", f"Ошибка статуса: {e}")
+            await message.answer(f"Ошибка статуса: {e}")
         return
 
     # ART-РЕЖИМ: выполнить команду и прислать результат картинкой (PNG)
