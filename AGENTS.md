@@ -54,6 +54,7 @@
 | `version.txt` | Текущая версия бота (выводится в debug-сообщениях) |
 | `vk-interactive-bot.service` | Пример unit-файла для systemd |
 | `requirements.txt` | Python-зависимости |
+| `CHANGELOG.md` | История изменений по версиям (обновляется при каждом релизе) |
 
 ---
 
@@ -124,7 +125,8 @@
   `VERSION = config_manager.VERSION`. Файл `version.txt` читается `get_version()`
   на лету и может переопределять версию, показанную в заголовках путей.
   При каждом изменении функциональности повышай `VERSION` (например `5.4.0` → `5.4.1`)
-  и синхронизируй `version.txt`.
+  и синхронизируй `version.txt`. Каждый релиз/фикс фиксируй новым разделом
+  в `CHANGELOG.md`.
 - **Единый логгер**: `log_message(level, message)` живёт в `config_manager.py`.
   Используй его вместо `print()` и вместо локального логгирования. Он пишет
   в stdout и в `bot_server.log`.
