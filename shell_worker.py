@@ -99,6 +99,7 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                     current_kb = config_manager.generate_dynamic_keyboard()
                     
                     current_path = "/root"
+                    exit_code = "0"
                     try:
                         clean_marker_line = ANSI_ESCAPE.sub('', decoded_chunk).strip()
                         if MARKER in clean_marker_line:
@@ -106,10 +107,14 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                             leftover = clean_marker_line[:idx].replace("\r", "").replace("\n", "").strip()
                             if leftover and leftover != "stty -echo":
                                 buffer.append(leftover + "\n")
-                            
-                            raw_path = clean_marker_line[idx + len(MARKER):].replace("\r", "").replace("\n", "").strip()
-                            current_path = raw_path.replace(":", "").strip()
-                            
+
+                            # Формат: MARKER:<exit_code>:<pwd>
+                            raw_rest = clean_marker_line[idx + len(MARKER):].replace("\r", "").replace("\n", "").strip()
+                            raw_rest = raw_rest.lstrip(":")
+                            parts = raw_rest.split(":", 1)
+                            exit_code = parts[0].strip() if parts else "0"
+                            current_path = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "/"
+
                             # ИСПРАВЛЕНО (v5.2.1): Обновляем локальный кэш без опасных импортов!
                             if current_path and "#" not in current_path and "/" in current_path:
                                 last_valid_path = current_path
@@ -136,7 +141,8 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
 
                     fresh_ver = config_manager.get_version()
                     executed_command = user_interactive_mode.get(f"{user_id}_last_cmd", "command")
-                    path_header = f"📁 [v{fresh_ver}] root@{HOSTNAME}:{current_path}# {executed_command}"
+                    ec_suffix = "" if exit_code in ("", "0") else f" ⚠️ exit {exit_code}"
+                    path_header = f"📁 [v{fresh_ver}] root@{HOSTNAME}:{current_path}# {executed_command}{ec_suffix}"
 
                     if not _is_alive():
                         return

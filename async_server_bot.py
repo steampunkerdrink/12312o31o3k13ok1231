@@ -59,6 +59,27 @@ try:
 except TypeError:
     doc_uploader = _DocUploader(bot.api) if _DocUploader is not None else None
 
+
+async def _show_typing(user_id: int):
+    """Статус «печатает…». Это НЕ сообщение в чат (messages.setActivity) — не спамит ВК."""
+    try:
+        await bot.api.messages.set_activity(type="typing", peer_id=user_id)
+    except Exception:
+        pass
+
+
+async def _notify_startup():
+    """Приветствие всем админам при запуске бота."""
+    msg = f"🟢 Бот запущен [v{VERSION}]"
+    for admin in ALLOWED_ADMINS:
+        try:
+            await bot.api.messages.send(peer_id=admin, message=msg, random_id=0)
+        except Exception as e:
+            config_manager.log_message("ERROR", f"Не удалось отправить приветствие {admin}: {e}")
+
+
+bot.on_startup.append(_notify_startup)
+
 # Единый список команд внутреннего хард-ресета (используется в двух местах ниже)
 HARD_RESET_COMMANDS = ["hard-reset", "убей сессию", "kill-session", "💀 hard reset"]
 
@@ -245,7 +266,7 @@ async def get_or_create_session(user_id: int, api):
     shell_worker.user_interactive_mode[user_id] = False
     
     await asyncio.sleep(0.3)
-    init_cmd = "stty -echo\nstty -icanon\necho ''\necho \"___END_OF_COMMAND___:\"$(pwd)\n"
+    init_cmd = "stty -echo\nstty -icanon\necho ''\nprintf '___END_OF_COMMAND___:%s:%s\\n' 0 \"$PWD\"\n"
     writer.write(init_cmd.encode("utf-8"))
     await writer.drain()
     return user_sessions[user_id]
@@ -256,6 +277,7 @@ async def run_as_art(user_id: int, command: str, message: Message):
         await message.answer("Пустая команда. Пример: art: qrencode -t ansiutf8 https://...")
         return
     config_manager.log_message("INFO", f"Админ [{user_id}] art-выполнение: {command}")
+    await _show_typing(user_id)
     full = f"cd {shell_worker.last_valid_path} && {command}"
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -474,20 +496,30 @@ async def handle_message(message: Message):
     session_data = await get_or_create_session(user_id, bot.api)
     writer = session_data["writer"]
 
+    await _show_typing(user_id)
     try:
         if shell_worker.user_interactive_mode.get(user_id, False):
             writer.write((command + "\n").encode("utf-8"))
             await writer.drain()
         else:
             is_interactive = config_manager.is_command_interactive(command)
-            
+
             if is_interactive:
                 shell_worker.user_interactive_mode[user_id] = True
                 full_command = f"{command}\n"
                 config_manager.log_message("INFO", f"Включен интерактивный режим для команды: {command}")
+                await message.answer(
+                    "▶️ Интерактивный режим: команда выполняется в живой сессии. "
+                    "Выход — «reset» или Ctrl+C."
+                )
             else:
-                full_command = command + "\necho ''\necho \"___END_OF_COMMAND___:\"$(pwd)\n"
-                
+                full_command = (
+                    command
+                    + "\n__ec=$?\n"
+                    + "echo ''\n"
+                    + "printf '___END_OF_COMMAND___:%s:%s\\n' \"$__ec\" \"$PWD\"\n"
+                )
+
             writer.write(full_command.encode("utf-8"))
             await writer.drain()
             
