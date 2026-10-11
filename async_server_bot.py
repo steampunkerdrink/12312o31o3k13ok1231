@@ -434,6 +434,10 @@ async def _run_capture(full_command: str, env: dict, timeout: float = 120):
             except asyncio.TimeoutError:
                 timed_out = True
                 break
+            except OSError:
+                # PTY: при закрытии slave дочерним процессом чтение master даёт EIO.
+                # Это штатный конец вывода, а не ошибка.
+                break
             if not chunk:
                 break
             data.extend(chunk)
