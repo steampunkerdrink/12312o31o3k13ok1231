@@ -45,7 +45,7 @@ DEFAULT_BG = (18, 18, 24)
 # Рабочий конфиг рендера. Меняется текстовыми командами боту: `art:bg dark|light|auto`, `art:font N`.
 CONFIG = {"bg": "dark", "font_size": 17}
 LIGHT_FG = (24, 24, 28)
-LIGHT_BG = (245, 245, 247)
+LIGHT_BG = (255, 255, 255)
 
 
 def configure(bg=None, font_size=None):
