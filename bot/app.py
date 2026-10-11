@@ -70,6 +70,18 @@ TOKEN, ALLOWED_ADMINS = config_manager.load_secret_config()
 bot = Bot(token=TOKEN)
 user_sessions = {}
 
+# Блокировки отправки ART на пользователя: чтобы фото+документ одной команды не перемешивались
+# с сообщениями следующей команды (и не приезжали в «чужом» ответе).
+_art_send_locks = {}
+
+
+def _art_lock(user_id: int) -> asyncio.Lock:
+    lock = _art_send_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _art_send_locks[user_id] = lock
+    return lock
+
 # Фото-загрузчик: имя файла picture.png — так VK распознаёт PNG (рендер отдаёт PNG).
 try:
     photo_uploader = _PhotoUploader(bot.api, attachment_name="picture.png")
@@ -563,7 +575,8 @@ async def _resend_last_art(user_id: int, message: Message):
         await message.answer(f"Не удалось прочитать сохранённую картинку: {e}")
         return
     await _show_typing(user_id)
-    await _send_image_to_user(user_id, data, caption="🔁 Последняя ART-картинка")
+    async with _art_lock(user_id):
+        await _send_image_to_user(user_id, data, caption="🔁 Последняя ART-картинка")
 
 
 # Последняя art-команда пользователя — для подписи на картинке
@@ -594,7 +607,10 @@ async def _render_session_image(user_id: int, raw_bytes: bytes):
             f.write(upload_bytes)
     except Exception as e:
         config_manager.log_message("WARNING", f"Не удалось сохранить последнюю картинку: {e}")
-    await _send_image_to_user(user_id, upload_bytes)
+    config_manager.log_message("INFO", f"Админ [{user_id}] art-рендер: {cmd or '(без команды)'}")
+    # Отправляем под блокировкой, чтобы фото+документ ушли цельно и не перемешались с другой командой
+    async with _art_lock(user_id):
+        await _send_image_to_user(user_id, upload_bytes)
 
 
 shell_worker.image_renderer = _render_session_image
