@@ -648,15 +648,18 @@ async def handle_message(message: Message):
 
     # ВНУТРЕННИЙ ХАРД-РЕСЕТ СЕССИИ (v5.3.0)
     if text_input.lower() in HARD_RESET_COMMANDS:
+        config_manager.log_message("WARNING", f"Админ [{user_id}] HARD-RESET (kill-session): уничтожение сессии")
         await _teardown_session(user_id)
         shell_worker.user_interactive_mode[user_id] = False
         shell_worker.current_flood_multiplier = 1.0
         shell_worker.last_valid_path = "/root"
+        config_manager.log_message("INFO", f"Админ [{user_id}] HARD-RESET: сессия уничтожена, ждём создание по следующей команде")
 
-        # Даём ОС освободить fd/процесс старой сессии — иначе новая окажется «глухой»
-        await asyncio.sleep(0.3)
-        await get_or_create_session(user_id, bot.api)
-        await message.answer("💀 [INTERNAL HARD-RESET]: Зависшая сессия bash полностью уничтожена. Создан новый чистый терминал!")
+        # ИСПРАВЛЕНО (v5.9.2): НЕ создаём новую сессию тут же после уничтожения старой.
+        # Раньше после HARD-RESET на тяжёлом ssh/интерактиве ОС не успевала освободить
+        # fd/процессы, и новая сессия получалась «глухой» (молчала). Теперь создание ленивое —
+        # как в обычном reset (этот путь стабилен): новую сессию поднимет следующая команда.
+        await message.answer("💀 [INTERNAL HARD-RESET]: Сессия bash уничтожена. Новая создастся автоматически по следующей команде.")
         return
 
     if text_input.lower() in ["turbo", "турбо", "⚡ турбо"]:
