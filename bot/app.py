@@ -489,6 +489,17 @@ async def get_or_create_session(user_id: int, api):
     return user_sessions[user_id]
 
 
+def _vk_error_text(e) -> str:
+    """Читаемое описание ошибки VK (код + сообщение), иначе обычный текст исключения."""
+    code = getattr(e, "code", None)
+    msg = getattr(e, "error_msg", None) or getattr(e, "message", None)
+    if code is not None and msg:
+        return f"VK error {code}: {msg}"
+    if msg:
+        return str(msg)
+    return str(e)
+
+
 def _fail_message_with_tmp(user_id: int, data: bytes, reason: str) -> str:
     """Собирает текст ошибки и сохраняет картинку во временный файл tmp/art_<id>.png."""
     msg = f"Не удалось отправить картинку ({reason})."
@@ -520,10 +531,10 @@ async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = "
             config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: документ (art:doc) отправлен")
             return
         except Exception as e_doc:
-            config_manager.log_message("ERROR", f"ART art:doc: документ не прошёл: {e_doc}")
+            config_manager.log_message("ERROR", f"ART art:doc: документ не прошёл: {_vk_error_text(e_doc)}")
             await bot.api.messages.send(
                 peer_id=user_id,
-                message=_fail_message_with_tmp(user_id, image_bytes, f"документ: {e_doc}"),
+                message=_fail_message_with_tmp(user_id, image_bytes, f"документ: {_vk_error_text(e_doc)}"),
                 random_id=0,
             )
             return
@@ -556,23 +567,25 @@ async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = "
             )
             await bot.api.messages.send(
                 peer_id=user_id,
-                message=(caption + f"\n⚠️ Фото не прошло ({photo_err}); отправил документом (PNG)").strip(),
+                message=(caption + f"\n⚠️ Фото не прошло ({_vk_error_text(photo_err)}); отправил документом (PNG)").strip(),
                 attachment=doc_attachment, random_id=0,
             )
             config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: документ (фолбэк) отправлен")
             return
         except Exception as e_doc:
-            config_manager.log_message("ERROR", f"ART фото: {photo_err}; документ: {e_doc}")
+            config_manager.log_message("ERROR", f"ART фото: {_vk_error_text(photo_err)}; документ: {_vk_error_text(e_doc)}")
             await bot.api.messages.send(
                 peer_id=user_id,
-                message=_fail_message_with_tmp(user_id, image_bytes, f"фото: {photo_err}; документ: {e_doc}"),
+                message=_fail_message_with_tmp(
+                    user_id, image_bytes, f"фото: {_vk_error_text(photo_err)}; документ: {_vk_error_text(e_doc)}"
+                ),
                 random_id=0,
             )
             return
 
     await bot.api.messages.send(
         peer_id=user_id,
-        message=_fail_message_with_tmp(user_id, image_bytes, f"фото: {photo_err}"),
+        message=_fail_message_with_tmp(user_id, image_bytes, f"фото: {_vk_error_text(photo_err)}"),
         random_id=0,
     )
 
@@ -694,8 +707,11 @@ async def _send_file_command(user_id: int, text: str, message: Message):
         )
         config_manager.log_message("INFO", f"Админ [{user_id}] send: {path} ({_fmt_bytes(size)})")
     except Exception as e:
-        config_manager.log_message("ERROR", f"send {path}: {e}")
-        await message.answer(f"Не удалось отправить файл «{title}»: {e}")
+        err = _vk_error_text(e)
+        config_manager.log_message("ERROR", f"send «{title}»: VK не принял файл — {err} (путь: {path})")
+        await message.answer(
+            f"❌ VK не принял файл «{title}»:\n{err}\n\nФайл лежит на сервере: {path}"
+        )
 
 
 # Последняя art-команда пользователя — для подписи на картинке
