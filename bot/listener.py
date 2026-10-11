@@ -145,7 +145,18 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                         session_capture_buf[user_id] = bytearray()
                         session_capture_requests.pop(user_id, None)
                         user_interactive_mode[user_id] = False
-                        raw_output = raw_all[:raw_all.find(MARKER.encode("utf-8"))]
+                        marker_bytes = MARKER.encode("utf-8")
+                        mpos = raw_all.find(marker_bytes)
+                        raw_output = raw_all[:mpos]
+                        # Обновляем текущий путь из маркера ($PWD). Раньше в ART-ветке это
+                        # игнорировалось, из-за чего шапка показывала устаревший каталог
+                        # (напр. после `cd` выводилось старое /root).
+                        tail = raw_all[mpos + len(marker_bytes):].decode("utf-8", "replace")
+                        tail = ANSI_ESCAPE.sub("", tail).replace("\r", "").replace("\n", "").strip().lstrip(":")
+                        parts = tail.split(":", 1)
+                        new_path = parts[1].strip() if len(parts) > 1 else ""
+                        if new_path and "/" in new_path and "#" not in new_path:
+                            last_valid_path = new_path
                         if image_renderer is not None and _is_alive():
                             try:
                                 await image_renderer(user_id, raw_output)
