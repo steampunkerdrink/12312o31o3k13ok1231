@@ -27,8 +27,9 @@ try:
 except Exception:
     RUN_USER = "user"
 
-# Строка shell-промпта: user@host:path# (или $ для non-root)
-PROMPT_RE = re.compile(r"^\s*[^\s@]+@[^\s:]+:.*[#$]\s*$")
+# Вкрапление shell-промпта (user@host:path#/$) — удаляем только его, сохраняя полезный
+# вывод (важно, когда команда печатает текст без \n и промпт слипается с ним).
+PROMPT_SUB = re.compile(r"[^\s@]+@[^\s:]+:[^\s]*[#$]\s?")
 
 # Активность сессии (последнее событие) — для авто-закрытия простаивающих сессий
 last_activity = {}
@@ -44,7 +45,12 @@ def clean_terminal_garbage(text: str) -> str:
     lines = text.split("\n")
     cleaned_lines = []
     for line in lines:
-        if PROMPT_RE.match(line) or "stty " in line or MARKER in line:
+        if "stty " in line:
+            continue
+        if MARKER in line:
+            line = line[:line.index(MARKER)]
+        line = PROMPT_SUB.sub("", line)
+        if not line.strip():
             continue
         cleaned_lines.append(line)
     return "\n".join(cleaned_lines).strip()
