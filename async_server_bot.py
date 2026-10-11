@@ -5,6 +5,10 @@ import os
 import shutil
 import signal
 import time
+try:
+    import pty
+except ImportError:  # не Linux (напр. Windows) — цвета в art будут недоступны
+    pty = None
 import config_manager
 import shell_worker
 import terminal_render
@@ -359,6 +363,67 @@ async def get_or_create_session(user_id: int, api):
     await writer.drain()
     return user_sessions[user_id]
 
+async def _run_capture(full_command: str, env: dict, timeout: float = 120):
+    """Выполняет команду и возвращает (raw_bytes, returncode, timed_out).
+
+    На Linux запускает в PTY, чтобы утилиты (ls, grep…) видели терминал и отдавали
+    ANSI-цвета — их потом отрисует terminal_render в цветную картинку.
+    """
+    if pty is None:
+        proc = await asyncio.create_subprocess_shell(
+            full_command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
+        try:
+            raw, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return raw or b"", proc.returncode, False
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return b"", None, True
+
+    master, slave = pty.openpty()
+    proc = await asyncio.create_subprocess_shell(
+        full_command,
+        stdin=slave, stdout=slave, stderr=slave,
+        env=env, preexec_fn=os.setsid,
+    )
+    os.close(slave)
+    loop = asyncio.get_event_loop()
+    reader = asyncio.StreamReader()
+    protocol = asyncio.StreamReaderProtocol(reader)
+    await loop.connect_read_pipe(lambda: protocol, os.fdopen(master, "rb"))
+
+    data = bytearray()
+    timed_out = False
+    try:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(reader.read(65536), timeout=timeout)
+            except asyncio.TimeoutError:
+                timed_out = True
+                break
+            if not chunk:
+                break
+            data.extend(chunk)
+    finally:
+        try:
+            if proc.returncode is None:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            pass
+        try:
+            await proc.wait()
+        except Exception:
+            pass
+    return bytes(data), proc.returncode, timed_out
+
+
 async def run_as_art(user_id: int, command: str, message: Message):
     """Выполняет команду в текущей папке сессии и присылает результат картинкой (PNG)."""
     if not command:
@@ -367,26 +432,21 @@ async def run_as_art(user_id: int, command: str, message: Message):
     config_manager.log_message("INFO", f"Админ [{user_id}] art-выполнение: {command}")
     await _show_typing(user_id)
     full = f"cd {shell_worker.last_valid_path} && {command}"
+    # PTY + TERM: утилиты (ls, grep, screenfetch…) видят терминал и отдают цвета.
+    _env = {**os.environ, "TERM": "xterm-256color", "CLICOLOR_FORCE": "1"}
     try:
-        proc = await asyncio.create_subprocess_shell(
-            full, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
-        )
-        raw, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        await message.answer("Команда выполнялась дольше 120 c — прервано.")
-        return
+        raw, returncode, timed_out = await _run_capture(full, _env, timeout=120)
     except Exception as e:
         config_manager.log_message("ERROR", f"art-команда не выполнилась: {e}")
         await message.answer(f"Ошибка выполнения: {e}")
         return
+    if timed_out:
+        await message.answer("Команда выполнялась дольше 120 c — прервано.")
+        return
     raw = raw or b""
-    if proc.returncode != 0:
+    if returncode not in (0, None):
         out = raw.decode("utf-8", errors="replace").strip()
-        await message.answer(f"Команда вернула код {proc.returncode}:\n{out[-2000:]}")
+        await message.answer(f"Команда вернула код {returncode}:\n{out[-2000:]}")
         return
     # 1) Рендерим PNG и перекодируем в JPEG (фото-сервер VK надёжнее принимает JPEG)
     try:
