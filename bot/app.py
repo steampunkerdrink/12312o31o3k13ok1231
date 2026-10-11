@@ -497,8 +497,10 @@ async def _send_image_to_user(user_id: int, upload_bytes: bytes, caption: str = 
 
     if doc_uploader is not None:
         try:
+            # title задаёт имя файла у VK: по умолчанию vkbottle ставит "doc.txt" —
+            # отсюда и «странный» .txt. Даём нормальное имя с .jpg (содержимое — JPEG).
             doc_attachment = await asyncio.wait_for(
-                doc_uploader.upload(file_source=upload_bytes, peer_id=user_id), timeout=30
+                doc_uploader.upload(file_source=upload_bytes, peer_id=user_id, title="art.jpg"), timeout=30
             )
             config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена документом")
             await bot.api.messages.send(
