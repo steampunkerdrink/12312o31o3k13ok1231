@@ -2,6 +2,7 @@ import asyncio
 import getpass
 import logging
 import os
+import re
 import shutil
 import signal
 import time
@@ -598,23 +599,74 @@ async def _resend_last_art(user_id: int, message: Message):
 SEND_MAX_BYTES = 100 * 1024 * 1024
 
 
+async def _download_url_to_tmp(url: str, user_id: int):
+    """Скачивает файл по URL во временный файл. Возвращает (path, filename) или (None, ошибка)."""
+    try:
+        import aiohttp
+    except Exception as e:
+        return None, f"aiohttp недоступен: {e}"
+    from urllib.parse import urlparse, unquote
+
+    timeout = aiohttp.ClientTimeout(total=600, connect=30)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    return None, f"HTTP {resp.status}"
+                # Имя файла: из Content-Disposition, иначе из URI
+                filename = ""
+                cd = resp.headers.get("Content-Disposition", "")
+                m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)\"?", cd)
+                if m:
+                    filename = m.group(1).strip()
+                if not filename:
+                    filename = unquote(os.path.basename(urlparse(url).path))
+                filename = os.path.basename(filename.replace("\\", "/")).strip() or "download.bin"
+                path = os.path.join(config_manager.TMP_DIR, f"dl_{user_id}_{filename}")
+                total = 0
+                with open(path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(65536):
+                        total += len(chunk)
+                        if total > SEND_MAX_BYTES:
+                            try:
+                                os.remove(path)
+                            except Exception:
+                                pass
+                            return None, f"файл больше {_fmt_bytes(SEND_MAX_BYTES)}"
+                        f.write(chunk)
+                return path, filename
+    except Exception as e:
+        return None, str(e)
+
+
 async def _send_file_command(user_id: int, text: str, message: Message):
-    """`send <путь>` — прислать файл с сервера в этот чат (документом, с реальным именем)."""
+    """`send <путь|url>` — прислать файл (с сервера или по ссылке) в этот чат документом."""
     parts = text.split(None, 1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.answer("Укажи файл: send <путь>  (например: send 1.txt)")
+        await message.answer("Укажи файл или ссылку: send <путь|url>  (напр.: send 1.txt  или  send https://host/f.zip)")
         return
-    raw_path = parts[1].strip().strip('"').strip("'")
-    base = shell_worker.last_valid_path or "/"
-    path = os.path.expanduser(raw_path if os.path.isabs(raw_path) else os.path.join(base, raw_path))
-    if not os.path.exists(path):
-        await message.answer(f"Файл не найден: {path}")
-        return
-    if os.path.isdir(path):
-        await message.answer(
-            f"Это папка: {path}\nСначала упакуй, напр.: tar czf out.tgz {raw_path}  → send out.tgz"
-        )
-        return
+    raw_arg = parts[1].strip().strip('"').strip("'")
+
+    if raw_arg.lower().startswith(("http://", "https://")):
+        await message.answer(f"⏬ Скачиваю: {raw_arg}")
+        path, info = await _download_url_to_tmp(raw_arg, user_id)
+        if path is None:
+            await message.answer(f"Не удалось скачать файл: {info}")
+            return
+        title = info
+    else:
+        base = shell_worker.last_valid_path or "/"
+        path = os.path.expanduser(raw_arg if os.path.isabs(raw_arg) else os.path.join(base, raw_arg))
+        if not os.path.exists(path):
+            await message.answer(f"Файл не найден: {path}")
+            return
+        if os.path.isdir(path):
+            await message.answer(
+                f"Это папка: {path}\nСначала упакуй, напр.: tar czf out.tgz {raw_arg}  → send out.tgz"
+            )
+            return
+        title = os.path.basename(path) or "file"
+
     if doc_uploader is None:
         await message.answer("Загрузчик документов недоступен.")
         return
@@ -632,7 +684,6 @@ async def _send_file_command(user_id: int, text: str, message: Message):
         config_manager.log_message("ERROR", f"send: чтение {path} не удалось: {e}")
         await message.answer(f"Не удалось прочитать файл: {e}")
         return
-    title = os.path.basename(path) or "file"
     await _show_typing(user_id)
     try:
         attachment = await asyncio.wait_for(
@@ -737,7 +788,7 @@ HELP_TEXT = (
     "• art:last — повторно прислать последнюю картинку\n"
     "• art:doc <команда> — прислать результат документом (по умолчанию — фото)\n"
     "• bg: <команда> — фоновый запуск (вывод приходит по мере работы)\n"
-    "• send <файл> — прислать файл с сервера в этот чат\n"
+    "• send <файл|url> — прислать файл с сервера или по ссылке в этот чат\n"
     "• reset / сброс / exit — очистить сессию\n"
     "• 💀 Hard Reset — убить зависшую сессию\n"
     "• ctrl / ctrl+c — отправить SIGINT (прервать вывод)\n"
