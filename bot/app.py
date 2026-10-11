@@ -476,11 +476,26 @@ async def get_or_create_session(user_id: int, api):
     return user_sessions[user_id]
 
 
+def _fail_message_with_tmp(user_id: int, data: bytes, reason: str) -> str:
+    """Собирает текст ошибки и сохраняет картинку во временный файл tmp/art_<id>.png."""
+    msg = f"Не удалось отправить картинку ({reason})."
+    try:
+        path = os.path.join(config_manager.TMP_DIR, f"art_{user_id}.png")
+        with open(path, "wb") as f:
+            f.write(data)
+        msg += f"\n💾 Сохранил картинку на сервере: {path}"
+        config_manager.log_message("INFO", f"Картинка сохранена в tmp: {path}")
+    except Exception as e:
+        config_manager.log_message("ERROR", f"Не удалось сохранить картинку в tmp: {e}")
+    return msg
+
+
 async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = ""):
     """Отправляет ART-картинку: фото-превью (PNG) + документ (PNG без потерь).
 
     Ничего не пережимаем. VK фото всё равно сожмёт у себя — поэтому дополнительно
     отдаём оригинал документом (документы VK не трогает).
+    Если VK не принял ничего — кладём PNG во временный файл и сообщаем путь.
     """
     # ── 1) Фото-превью (PNG, с ретраями) ──
     photo_err = None
@@ -521,14 +536,16 @@ async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = "
             if not photo_sent:
                 await bot.api.messages.send(
                     peer_id=user_id,
-                    message=f"Не удалось отправить картинку (фото: {photo_err}; документ: {e_doc}).",
+                    message=_fail_message_with_tmp(user_id, image_bytes, f"фото: {photo_err}; документ: {e_doc}"),
                     random_id=0,
                 )
             return
 
     if not photo_sent:
         await bot.api.messages.send(
-            peer_id=user_id, message=f"Не удалось отправить картинку (фото: {photo_err}).", random_id=0
+            peer_id=user_id,
+            message=_fail_message_with_tmp(user_id, image_bytes, f"фото: {photo_err}"),
+            random_id=0,
         )
 
 

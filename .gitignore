@@ -10,6 +10,7 @@ config/bot_config.txt
 *.log
 bot_server.log
 logs/
+tmp/
 
 # Кэш Python компилятора
 __pycache__/

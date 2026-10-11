@@ -35,8 +35,15 @@ except Exception:
 INFO_LOG_FILE = os.path.join(LOG_DIR, "info.log")
 ERROR_LOG_FILE = os.path.join(LOG_DIR, "error.log")
 
+# Каталог для временных файлов (напр. картинка, которую VK не принял).
+TMP_DIR = os.path.join(BASE_DIR, "tmp")
+try:
+    os.makedirs(TMP_DIR, exist_ok=True)
+except Exception:
+    pass
+
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.11.7"
+VERSION = "5.11.8"
 
 dynamic_commands_map = {}
 
