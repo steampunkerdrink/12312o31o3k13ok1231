@@ -36,7 +36,7 @@ INFO_LOG_FILE = os.path.join(LOG_DIR, "info.log")
 ERROR_LOG_FILE = os.path.join(LOG_DIR, "error.log")
 
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.11.4"
+VERSION = "5.11.5"
 
 dynamic_commands_map = {}
 
@@ -219,15 +219,32 @@ def get_interactive_commands() -> list:
 def is_command_interactive(cmd_text: str) -> bool:
     """Проверяет, должна ли команда запускаться в интерактивном режиме PTY."""
     cmd_lower = cmd_text.strip().lower()
-    if not cmd_lower: return False
-    
+    if not cmd_lower:
+        return False
+
+    # Имя команды — первый токен, пропуская обёртки (sudo/env/nohup/…), плюс basename,
+    # чтобы `/usr/bin/apt` и `./openflux2` определялись как apt/openflux2.
+    tokens = cmd_lower.split()
+    wrappers = {"sudo", "doas", "env", "nohup", "command", "nice", "time", "setsid"}
+    i = 0
+    while i < len(tokens) and tokens[i] in wrappers:
+        i += 1
+    cmd_base = os.path.basename(tokens[i]) if i < len(tokens) else ""
+
     interactive_list = get_interactive_commands()
+    # Сравниваем именно ИМЯ команды: `sudo apt install X` → apt (интерактив),
+    # а `cp -R OpenFlux2 X` → cp (обычная).
+    if cmd_base in interactive_list:
+        return True
+    # На случай записей с аргументами в interactive_list (старое поведение)
     if any(cmd_lower.startswith(x + " ") or cmd_lower == x for x in interactive_list):
         return True
-        
-    if "openflux" in cmd_lower and not cmd_lower.startswith("cd ") and not cmd_lower.startswith("ls "):
+
+    # Особый случай проекта: интерактивен ЗАПУСК openflux (имя команды), а не упоминание
+    # его в аргументах — иначе `cp -R OpenFlux2 OpenFluxRM` ложно уходил в интерактив.
+    if "openflux" in cmd_base:
         return True
-        
+
     return False
 
 def generate_dynamic_keyboard() -> str:
