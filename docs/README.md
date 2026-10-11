@@ -1,23 +1,35 @@
-# Setup
+# VK Interactive CLI Bot
+
+Shell over VK: run commands on a server through a VK community chat, with an optional ART mode
+(command output rendered as an image).
 
 ## Requirements
 
-Use Python 3.12+
+- Python 3.12+
+- Linux (uses PTY, `/bin/bash`). The bot does NOT run on Windows.
 
-## Create and activate a virtual environment
+## Project structure
 
-    bash
-    cd /root
-    git clone 
-    python3.12 -m venv venv
-    source venv/bin/activate
-    pip install -r requirements.txt
-## Create and activate a virtual environment
+    run.py                  entry point: from bot.app import main
+    bot/                    code
+      app.py                bot: message handling, PTY sessions, routing, ART pipeline
+      listener.py           PTY output listener, ANSI cleanup, end-marker, flood control
+      render.py             ANSI/SGR -> PNG renderer (art:, themes, font)
+      config.py             config reading, keyboard, log_message, VERSION
+    config/                 all .txt settings (see "Settings" below)
+    docs/                   README.md, AGENTS.md, CHANGELOG.md, IDEAS.md
+    deploy/                 vk-interactive-bot.service
+    requirements.txt        python dependencies
+
+## Setup
+
+### 1) Create and configure a VK community
+
 Create VK Group
 
 Enable Messages for Group (Настройки, сообщения, сообщения сообщества) https://vk.ru/clubID/settings/messages
 
-#Enable Bot Capabilities (for inline_keyboard) (Настройки, сообщения, настройки для бота, возможности  ботов https://vk.ru/clubID/settings/bots
+Enable Bot Capabilities (for inline_keyboard) (Настройки, сообщения, настройки для бота, возможности ботов) https://vk.ru/clubID/settings/bots
 
 Enable Long Poll API (Настройки, дополнительно, работа с API, Long Poll API) https://vk.ru/clubID?act=longpoll_api
 
@@ -33,36 +45,49 @@ Setup access_token (Настройки, дополнительно, работа
 
 Без `photos` ART-картинка не отправится (фото-загрузка вернёт пусто); без `docs` не уйдёт `send` и не сработает фолбэк «документом».
 
+## Setup (continued)
 
+### 2) Clone and create a virtual environment
 
-## Set TOKEN AND VK_USER_ID in config/bot_config.txt
-Set TOKEN and VK_USER_ID in config/bot_config.txt.
-Check the other files in `config/` for additional settings.
+    cd /root
+    git clone <repo-url> vk-api
+    cd vk-api
+    python3.12 -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
 
-    config/bot_config.txt.example -> file with dummy token and vk_user_id, rename to bot_config.txt
-    config/entrypoint.txt -> where/how the bash session starts: workdir=<dir>, init=<command>
-    config/delay_config.txt -> delay in seconds in when using interactive commands to avoid spamming VK_API with too many messages (default 5.0)
-    config/interactive_list.txt -> list of commands treated as interactive (legacy behavior)
-    config/keyboard_enable.txt -> true/false for inline_keyboard in VK (true by default)
-    config/keyboard_list.txt -> list of commands in inline_keyboard
-    requirements.txt -> python dependencies
-    config/version.txt -> version of bot for debug purposes
+### 3) Provide the secret config
 
-##   Run the bot manually (for testing purposes)
-	source venv/bin/activate
-	python3 run.py
+    cp config/bot_config.txt.example config/bot_config.txt
+    nano config/bot_config.txt      # TOKEN=... , ALLOWED_ADMINS=<id>[,<id>...]
 
-##   Run the bot with systemd
-Create the service file:
+## Settings (`config/`)
 
-    sudo nano /etc/systemd/system/vk-interactive-bot.service
+    config/bot_config.txt          SECRET: TOKEN=..., ALLOWED_ADMINS=ID,ID   (gitignored)
+    config/bot_config.txt.example  template for the secret config
+    config/entrypoint.txt          where/how the bash session starts: workdir=<dir>, init=<cmd>
+    config/delay_config.txt        base delay between messages, sec (min 1.0, default 5.0)
+    config/interactive_list.txt    comma-separated commands treated as interactive (live PTY)
+    config/keyboard_enable.txt     true/false — show the VK keyboard at all (default true)
+    config/keyboard_list.txt       custom buttons, one per line: "Name (command)"
+    config/keyboard_custom.txt     true/false — show custom buttons (system row stays)
+    config/idle_timeout.txt        seconds of inactivity before auto-closing the session (0 = off)
+    config/version.txt             bot version (shown in debug headers)
 
- An example service file is available in the repo, name: deploy/vk-interactive-bot.service
-Then reload systemd, enable the service, and start it:
+## Run
 
+Manual:
+
+    source venv/bin/activate
+    python3 run.py
+
+With systemd (example unit in the repo: `deploy/vk-interactive-bot.service`):
+
+    sudo cp deploy/vk-interactive-bot.service /etc/systemd/system/
     sudo systemctl daemon-reload
-    sudo systemctl enable vk-interactive-bot
-    sudo systemctl start vk-interactive-bot
+    sudo systemctl enable --now vk-interactive-bot
+
+Logs: stdout + `logs/info.log` (INFO/WARNING) and `logs/error.log` (ERROR).
 
 ## Available commands (in VK chat)
 
