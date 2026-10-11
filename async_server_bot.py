@@ -130,10 +130,30 @@ async def _cleanup_sessions():
         _close_session(uid)
 
 
+async def _graceful_stop():
+    config_manager.log_message("INFO", "Сигнал остановки: закрываю дочерние сессии")
+    await _cleanup_sessions()
+    try:
+        asyncio.get_running_loop().stop()
+    except Exception:
+        pass
+
+
+async def _install_signal_handlers():
+    """SIGTERM/SIGINT → корректно закрыть сессии и остановить цикл (systemctl stop/restart)."""
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, lambda: asyncio.ensure_future(_graceful_stop()))
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass
+
+
 # Регистрация в хуках vkbottle. ВАЖНО: это списки КОРУТИН (объектов), а не функций.
 # on_startup/on_shutdown прогоняются через run_until_complete (короткие),
 # startup_tasks — как долгоживущие задачи (_drain).
 bot.on_startup.append(_notify_startup())
+bot.on_startup.append(_install_signal_handlers())
 bot.on_shutdown.append(_cleanup_sessions())
 bot.startup_tasks.append(_idle_watchdog())
 

@@ -124,8 +124,11 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                         clean_marker_line = ANSI_ESCAPE.sub('', decoded_chunk).strip()
                         if MARKER in clean_marker_line:
                             idx = clean_marker_line.index(MARKER)
-                            leftover = clean_marker_line[:idx].replace("\r", "").replace("\n", "").strip()
-                            if leftover and leftover != "stty -echo":
+                            # ВАЖНО: не схлопываем переводы строк — иначе, когда весь вывод
+                            # команды приходит одним куском с маркером, многострочный вывод
+                            # склеивается в одну строку.
+                            leftover = clean_marker_line[:idx].replace("\r", "").rstrip()
+                            if leftover and leftover.strip() != "stty -echo":
                                 buffer.append(leftover + "\n")
 
                             # Формат: MARKER:<exit_code>:<pwd>
