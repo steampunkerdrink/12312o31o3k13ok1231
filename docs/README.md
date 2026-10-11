@@ -21,7 +21,17 @@ Enable Messages for Group (Настройки, сообщения, сообще�
 
 Enable Long Poll API (Настройки, дополнительно, работа с API, Long Poll API) https://vk.ru/clubID?act=longpoll_api
 
-Setup access_token (Настройки, дополнительно, работа с API), доступы: сообщения соообщества, управление сообществом) https://vk.ru/clubID?act=tokens 
+Setup access_token (Настройки, дополнительно, работа с API), доступы: сообщения сообщества, управление сообществом) https://vk.ru/clubID?act=tokens
+
+### Access rights / Права доступа (важно!)
+
+Для работы нужны права доступа сообщества (Настройки сообщества → Работа с API → Ключи доступа):
+
+- `messages` — сообщения сообщества (основа, без него бот не работает);
+- `photos` — загрузка **фотографий** в сообщения → нужны для **ART** (`art:`, ART-режим, картинки);
+- `docs` — загрузка **документов** в сообщения → нужны для **`send <файл>`** и для документа-фолбэка картинок.
+
+Без `photos` ART-картинка не отправится (фото-загрузка вернёт пусто); без `docs` не уйдёт `send` и не сработает фолбэк «документом».
 
 
 
@@ -47,7 +57,7 @@ Create the service file:
 
     sudo nano /etc/systemd/system/vk-interactive-bot.service
 
- An example service file is available in the project’s root directory, name: vk-interactive-bot.service
+ An example service file is available in the repo, name: deploy/vk-interactive-bot.service
 Then reload systemd, enable the service, and start it:
 
     sudo systemctl daemon-reload

@@ -32,6 +32,7 @@
 | HTTP/асинхронность | **aiohttp** `>=3.9.0`, `asyncio` |
 | Валидация | **pydantic** `>=1.10.0` |
 | Зависимости | в `requirements.txt` |
+| Права доступа (сообщество) | `messages`, `photos` (ART-картинки), `docs` (`send`, документ-фолбэк) |
 | Запуск | вручную (`python3 run.py`) или через `systemd` |
 | ОС деплоя | Linux (используется `os.openpty`, `os.setsid`, `/bin/bash`, `/root`) |
 
