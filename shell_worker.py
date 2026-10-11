@@ -15,6 +15,12 @@ current_flood_multiplier = 1.0
 # чтобы «старый» фоновый слушатель перестал слать вывод после сброса.
 session_tokens = {}
 
+# ART-захват: захватываем сырой вывод (с ANSI) активной сессии до маркера,
+# затем отдаём его в image_renderer для рендера в картинку.
+session_capture_requests = {}
+session_capture_buf = {}
+image_renderer = None  # async callable(user_id, raw_bytes), назначается из async_server_bot
+
 # ИСПРАВЛЕНО (v5.2.1): Кэш путей теперь монолитно живёт здесь, решая проблему Circular Import!
 last_valid_path = "/root"
 
@@ -114,6 +120,23 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                     
                 decoded_chunk = chunk_bytes.decode("utf-8", errors="replace")
 
+                # ART-захват: копим СЫРОЙ вывод (с ANSI) до маркера, потом отдаём рендереру
+                if session_capture_requests.get(user_id):
+                    session_capture_buf.setdefault(user_id, bytearray()).extend(chunk_bytes)
+                    last_activity[user_id] = time.time()
+                    if MARKER.encode("utf-8") in session_capture_buf[user_id]:
+                        raw_all = bytes(session_capture_buf[user_id])
+                        session_capture_buf[user_id] = bytearray()
+                        session_capture_requests.pop(user_id, None)
+                        user_interactive_mode[user_id] = False
+                        raw_output = raw_all[:raw_all.find(MARKER.encode("utf-8"))]
+                        if image_renderer is not None and _is_alive():
+                            try:
+                                await image_renderer(user_id, raw_output)
+                            except Exception as e_cap:
+                                log_message("ERROR", f"Ошибка рендера изображения из сессии: {e_cap}")
+                    continue
+
                 if MARKER in decoded_chunk:
                     user_interactive_mode[user_id] = False
                     current_kb = config_manager.generate_dynamic_keyboard()
@@ -183,7 +206,7 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                 buffer.append(decoded_chunk)
 
             except asyncio.TimeoutError:
-                if buffer:
+                if buffer and not session_capture_requests.get(user_id):
                     current_time = asyncio.get_event_loop().time()
                     base_delay = config_manager.get_dynamic_delay()
                     

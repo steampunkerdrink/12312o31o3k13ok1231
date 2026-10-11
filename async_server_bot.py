@@ -409,7 +409,16 @@ async def get_or_create_session(user_id: int, api):
     # Инициализация сессии. PS1='' — убираем приглашение bash (иначе вывод без \n
     # слипается с промптом). Маркер здесь НЕ печатаем: иначе слушатель примет его
     # за завершение команды и пришлёт лишний заголовок пути (дубликат).
-    init_cmd = "stty -echo\nstty -icanon\nPS1=''\nPS2=''\n"
+    # Алиасы — чтобы ls/grep красили вывод (для ART-картинок из сессии).
+    init_cmd = (
+        "stty -echo\nstty -icanon\nPS1=''\nPS2=''\n"
+        "shopt -s expand_aliases\n"
+        "alias ls='ls --color=auto'\n"
+        "alias grep='grep --color=auto'\n"
+        "alias fgrep='fgrep --color=auto'\n"
+        "alias egrep='egrep --color=auto'\n"
+        "alias diff='diff --color=auto'\n"
+    )
     writer.write(init_cmd.encode("utf-8"))
     await writer.drain()
     return user_sessions[user_id]
@@ -479,55 +488,8 @@ async def _run_capture(full_command: str, env: dict, timeout: float = 120):
     return bytes(data), proc.returncode, timed_out
 
 
-async def run_as_art(user_id: int, command: str, message: Message):
-    """Выполняет команду в текущей папке сессии и присылает результат картинкой (PNG)."""
-    if not command:
-        await message.answer("Пустая команда. Пример: art: qrencode -t ansiutf8 https://...")
-        return
-    config_manager.log_message("INFO", f"Админ [{user_id}] art-выполнение: {command}")
-    await _show_typing(user_id)
-    # Алиасы цветного вывода: в неинтерактивном bash их нет (они в .bashrc), поэтому
-    # задаём сами. ls/grep красят только при --color + вывод на терминал (PTY это даёт).
-    _aliases = (
-        "shopt -s expand_aliases\n"
-        "alias ls='ls --color=auto'\n"
-        "alias grep='grep --color=auto'\n"
-        "alias fgrep='fgrep --color=auto'\n"
-        "alias egrep='egrep --color=auto'\n"
-        "alias diff='diff --color=auto'\n"
-    )
-    full = _aliases + f"cd {shell_worker.last_valid_path} && {command}\n"
-    _env = {**os.environ, "TERM": "xterm-256color", "CLICOLOR_FORCE": "1"}
-    try:
-        raw, returncode, timed_out = await _run_capture(full, _env, timeout=120)
-    except Exception as e:
-        config_manager.log_message("ERROR", f"art-команда не выполнилась: {e}")
-        await message.answer(f"Ошибка выполнения: {e}")
-        return
-    if timed_out:
-        await message.answer("Команда выполнялась дольше 120 c — прервано.")
-        return
-    raw = raw or b""
-    if returncode not in (0, None):
-        out = raw.decode("utf-8", errors="replace").strip()
-        await message.answer(f"Команда вернула код {returncode}:\n{out[-2000:]}")
-        return
-    # 1) Рендерим PNG и перекодируем в JPEG (фото-сервер VK надёжнее принимает JPEG)
-    try:
-        png = terminal_render.render(raw)
-        img = _PILImage.open(BytesIO(png)).convert("RGB")
-        jpeg_buf = BytesIO()
-        img.save(jpeg_buf, format="JPEG", quality=90)
-        upload_bytes = jpeg_buf.getvalue()
-    except Exception as e:
-        config_manager.log_message("ERROR", f"Ошибка рендера art-вывода: {e}")
-        await message.answer(
-            f"Не удалось отрисовать картинку: {e}\nСырой вывод:\n"
-            + raw.decode("utf-8", errors="replace")[-2000:]
-        )
-        return
-
-    # 2) Отправляем как фото (несколько попыток + таймаут)
+async def _send_image_to_user(user_id: int, upload_bytes: bytes, caption: str = ""):
+    """Отправляет картинку в VK: фото (с ретраями), при неудаче — документом."""
     photo_err = None
     for _attempt in range(1, 4):
         try:
@@ -539,38 +501,93 @@ async def run_as_art(user_id: int, command: str, message: Message):
                 attachment = await asyncio.wait_for(
                     photo_uploader.upload_photos(file_source=upload_bytes, peer_id=user_id), timeout=30
                 )
-            await message.answer(attachment=attachment)
+            await bot.api.messages.send(peer_id=user_id, message=caption, attachment=attachment, random_id=0)
             config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена фото")
             return
         except Exception as e_photo:
             photo_err = e_photo
-            config_manager.log_message("WARNING", f"Фото-загрузка не удалась ({e_photo}); попытка {_attempt}/3")
             await asyncio.sleep(1)
 
-    # 3) Фолбэк: отправляем как документ (с таймаутом)
     if doc_uploader is not None:
         try:
             doc_attachment = await asyncio.wait_for(
                 doc_uploader.upload(file_source=upload_bytes, peer_id=user_id), timeout=30
             )
             config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена документом")
-            await message.answer(
-                message=f"⚠️ Фото-загрузка не прошла ({photo_err}); отправил изображением.",
-                attachment=doc_attachment,
+            await bot.api.messages.send(
+                peer_id=user_id,
+                message=(caption + f"\n⚠️ Фото не прошло ({photo_err}); отправил документом").strip(),
+                attachment=doc_attachment, random_id=0,
             )
             return
         except Exception as e_doc:
             config_manager.log_message("ERROR", f"Фото: {photo_err}; документ: {e_doc}")
-            await message.answer(
-                f"Не удалось отправить картинку (фото: {photo_err}; документ: {e_doc}).\n"
-                f"Сырой вывод:\n{raw.decode('utf-8', errors='replace')[-1500:]}"
+            await bot.api.messages.send(
+                peer_id=user_id,
+                message=f"Не удалось отправить картинку (фото: {photo_err}; документ: {e_doc}).",
+                random_id=0,
             )
             return
 
-    await message.answer(
-        f"Не удалось отправить картинку (фото: {photo_err}).\n"
-        f"Сырой вывод:\n{raw.decode('utf-8', errors='replace')[-1500:]}"
+    await bot.api.messages.send(
+        peer_id=user_id, message=f"Не удалось отправить картинку (фото: {photo_err}).", random_id=0
     )
+
+
+async def _render_session_image(user_id: int, raw_bytes: bytes):
+    """Callback из shell_worker: рендерит сырой вывод сессии (с ANSI) в картинку и шлёт в VK."""
+    try:
+        png = terminal_render.render(raw_bytes)
+        img = _PILImage.open(BytesIO(png)).convert("RGB")
+        jpeg_buf = BytesIO()
+        img.save(jpeg_buf, format="JPEG", quality=90)
+        upload_bytes = jpeg_buf.getvalue()
+    except Exception as e:
+        config_manager.log_message("ERROR", f"Ошибка рендера изображения из сессии: {e}")
+        await bot.api.messages.send(peer_id=user_id, message=f"Не удалось отрисовать картинку: {e}", random_id=0)
+        return
+    await _send_image_to_user(user_id, upload_bytes)
+
+
+shell_worker.image_renderer = _render_session_image
+
+
+async def _capture_timeout(user_id: int, seconds: int = 60):
+    """Страховка: если маркер не пришёл — снимаем захват и сообщаем."""
+    await asyncio.sleep(seconds)
+    if shell_worker.session_capture_requests.get(user_id):
+        shell_worker.session_capture_requests.pop(user_id, None)
+        shell_worker.session_capture_buf.pop(user_id, None)
+        try:
+            await bot.api.messages.send(
+                peer_id=user_id,
+                message=f"⏱ ART-захват: маркер не получен за {seconds} c (команда не завершилась?).",
+                random_id=0,
+            )
+        except Exception:
+            pass
+
+
+async def _art_via_session(user_id: int, command: str):
+    """ART в контексте активной сессии (в т.ч. ssh): пишем команду+маркер, рендер по маркеру."""
+    session = await get_or_create_session(user_id, bot.api)
+    writer = session["writer"]
+    shell_worker.session_capture_buf[user_id] = bytearray()
+    shell_worker.session_capture_requests[user_id] = True
+    marker_cmd = "printf '\\n___END_OF_COMMAND___:%s:%s\\n' \"$?\" \"$PWD\""
+    writer.write((command + "\n" + marker_cmd + "\n").encode("utf-8"))
+    await writer.drain()
+    asyncio.create_task(_capture_timeout(user_id))
+
+
+async def run_as_art(user_id: int, command: str, message: Message):
+    """ART: выполняет команду в контексте активной сессии (в т.ч. ssh) и шлёт картинку."""
+    if not command:
+        await message.answer("Пустая команда. Пример: art: ls -la")
+        return
+    config_manager.log_message("INFO", f"Админ [{user_id}] art-выполнение: {command}")
+    await _show_typing(user_id)
+    await _art_via_session(user_id, command)
 
 
 async def handle_art_command(user_id: int, text: str, message: Message):
@@ -680,7 +697,8 @@ async def handle_message(message: Message):
 
     # Если включён ART-режим — обычные команды шлём картинкой.
     # Исключение: интерактивные команды (ssh, apt, nano, mysql, ufw…) всё равно
-    # идут в живую PTY-сессию, чтобы работать интерактивно (у art-подпроцесса лимит 120c).
+    # идут в живую PTY-сессию, чтобы работать интерактивно (ART-захват
+    # рассчитан на завершающиеся команды; у него страховка-таймаут 60 c).
     if config_manager.art_mode and not config_manager.is_command_interactive(command):
         try:
             await run_as_art(user_id, command, message)
