@@ -103,6 +103,32 @@ def _close_session(user_id: int):
     shell_worker.user_interactive_mode[user_id] = False
 
 
+async def _teardown_session(user_id: int):
+    """Асинхронно снимает сессию: отменяет и дожидается слушателя, убивает процесс.
+
+    Дождаться завершения слушателя важно: иначе fd/транспорт старой сессии ещё не
+    освобождены, и сразу созданная новая сессия окажется «глухой».
+    """
+    session = user_sessions.pop(user_id, None)
+    shell_worker.session_tokens.pop(user_id, None)
+    shell_worker.last_activity.pop(user_id, None)
+    if not session:
+        return
+    try:
+        session["task"].cancel()
+        await asyncio.wait_for(session["task"], timeout=2)
+    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+        pass
+    try:
+        os.killpg(os.getpgid(session["process"].pid), signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        os.close(session["master_fd"])
+    except Exception:
+        pass
+
+
 async def _idle_watchdog():
     """Периодически закрывает простаивающие сессии. Порог — idle_timeout.txt (0 = выкл)."""
     while True:
@@ -564,16 +590,7 @@ async def handle_message(message: Message):
     lower_text = text_input.lower()
     is_hard_reset = lower_text in HARD_RESET_COMMANDS
     if not is_hard_reset and ("сброс" in lower_text or "reset" in lower_text or lower_text == "exit"):
-        if user_id in user_sessions:
-            session = user_sessions[user_id]
-            session["task"].cancel()
-            shell_worker.session_tokens.pop(user_id, None)
-            await asyncio.sleep(0.1)
-            try: os.close(session["master_fd"])
-            except: pass
-            try: os.killpg(os.getpgid(session["process"].pid), signal.SIGKILL)
-            except: pass
-            del user_sessions[user_id]
+        await _teardown_session(user_id)
         shell_worker.user_interactive_mode[user_id] = False
         shell_worker.current_flood_multiplier = 1.0
         shell_worker.last_valid_path = "/root"
@@ -583,21 +600,13 @@ async def handle_message(message: Message):
 
     # ВНУТРЕННИЙ ХАРД-РЕСЕТ СЕССИИ (v5.3.0)
     if text_input.lower() in HARD_RESET_COMMANDS:
-        if user_id in user_sessions:
-            session = user_sessions[user_id]
-            session["task"].cancel()
-            shell_worker.session_tokens.pop(user_id, None)
-            await asyncio.sleep(0.05)
-            try:
-                os.killpg(os.getpgid(session["process"].pid), signal.SIGKILL)
-                os.close(session["master_fd"])
-            except: pass
-            del user_sessions[user_id]
-            
+        await _teardown_session(user_id)
         shell_worker.user_interactive_mode[user_id] = False
         shell_worker.current_flood_multiplier = 1.0
         shell_worker.last_valid_path = "/root"
-        
+
+        # Даём ОС освободить fd/процесс старой сессии — иначе новая окажется «глухой»
+        await asyncio.sleep(0.3)
         await get_or_create_session(user_id, bot.api)
         await message.answer("💀 [INTERNAL HARD-RESET]: Зависшая сессия bash полностью уничтожена. Создан новый чистый терминал!")
         return
