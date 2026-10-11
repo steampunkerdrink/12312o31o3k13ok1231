@@ -396,8 +396,8 @@ async def _run_capture(full_command: str, env: dict, timeout: float = 120):
     ANSI-цвета — их потом отрисует terminal_render в цветную картинку.
     """
     if pty is None:
-        proc = await asyncio.create_subprocess_shell(
-            full_command,
+        proc = await asyncio.create_subprocess_exec(
+            "/bin/bash", "-c", full_command,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -414,8 +414,8 @@ async def _run_capture(full_command: str, env: dict, timeout: float = 120):
             return b"", None, True
 
     master, slave = pty.openpty()
-    proc = await asyncio.create_subprocess_shell(
-        full_command,
+    proc = await asyncio.create_subprocess_exec(
+        "/bin/bash", "-c", full_command,
         stdin=slave, stdout=slave, stderr=slave,
         env=env, preexec_fn=os.setsid,
     )
@@ -461,8 +461,17 @@ async def run_as_art(user_id: int, command: str, message: Message):
         return
     config_manager.log_message("INFO", f"Админ [{user_id}] art-выполнение: {command}")
     await _show_typing(user_id)
-    full = f"cd {shell_worker.last_valid_path} && {command}"
-    # PTY + TERM: утилиты (ls, grep, screenfetch…) видят терминал и отдают цвета.
+    # Алиасы цветного вывода: в неинтерактивном bash их нет (они в .bashrc), поэтому
+    # задаём сами. ls/grep красят только при --color + вывод на терминал (PTY это даёт).
+    _aliases = (
+        "shopt -s expand_aliases\n"
+        "alias ls='ls --color=auto'\n"
+        "alias grep='grep --color=auto'\n"
+        "alias fgrep='fgrep --color=auto'\n"
+        "alias egrep='egrep --color=auto'\n"
+        "alias diff='diff --color=auto'\n"
+    )
+    full = _aliases + f"cd {shell_worker.last_valid_path} && {command}\n"
     _env = {**os.environ, "TERM": "xterm-256color", "CLICOLOR_FORCE": "1"}
     try:
         raw, returncode, timed_out = await _run_capture(full, _env, timeout=120)
