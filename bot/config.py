@@ -25,10 +25,18 @@ INTERACTIVE_FILE = _cfg("interactive_list.txt")
 KEYBOARD_CUSTOM_FILE = _cfg("keyboard_custom.txt")
 IDLE_FILE = _cfg("idle_timeout.txt")
 ENTRYPOINT_FILE = _cfg("entrypoint.txt")
-LOG_FILE = os.path.join(BASE_DIR, "bot_server.log")
+
+# Логи пишем в logs/ двумя потоками: info.log (INFO/WARNING) и error.log (ERROR).
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except Exception:
+    pass
+INFO_LOG_FILE = os.path.join(LOG_DIR, "info.log")
+ERROR_LOG_FILE = os.path.join(LOG_DIR, "error.log")
 
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.11.0"
+VERSION = "5.11.1"
 
 dynamic_commands_map = {}
 
@@ -38,12 +46,14 @@ art_mode = False
 
 
 def log_message(level: str, message: str):
-    """Единый логгер проекта: метка времени, stdout + файл bot_server.log"""
+    """Единый логгер проекта: метка времени, stdout + файл в logs/ (info.log или error.log)."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_line = f"{timestamp} [{level}] {message}"
     print(log_line, flush=True)
+    target = ERROR_LOG_FILE if level.upper() == "ERROR" else INFO_LOG_FILE
     try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(target, "a", encoding="utf-8") as f:
             f.write(log_line + "\n")
     except Exception as e_log:
         print(f"[log_message] Не удалось записать лог в файл: {e_log}", flush=True)

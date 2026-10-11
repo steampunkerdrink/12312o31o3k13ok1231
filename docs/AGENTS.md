@@ -138,7 +138,7 @@
   в `CHANGELOG.md`.
 - **Единый логгер**: `log_message(level, message)` живёт в `bot/config.py`.
   Используй его вместо `print()` и вместо локального логгирования. Он пишет
-  в stdout и в `bot_server.log`.
+  в stdout и в `logs/` (`info.log` для INFO/WARNING, `error.log` для ERROR).
 - **ART-режим**: глобальный флаг `config_manager.art_mode` (True = обычные команды
   приходят картинкой). Управляется кнопками `🖼 ART` / `📄 Текст`; проверка
   переключателей стоит в `handle_message` раньше остальных команд.
@@ -173,7 +173,7 @@ python3 run.py                     # запуск вручную (точка в�
 sudo systemctl restart vk-interactive-bot   # через systemd
 ```
 
-Логи: вывод в stdout + файл `bot_server.log` (в `.gitignore`).
+Логи: вывод в stdout + `logs/info.log` (INFO/WARNING) и `logs/error.log` (ERROR).
 
 **Рекомендация при внесении правок**: минимум — проверить `python3 -m py_compile`
 для изменённых модулей, идеально — прогон на Linux-сервере.

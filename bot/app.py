@@ -31,10 +31,10 @@ _mirrored = False
 
 
 def _mirror_logging_to_file() -> None:
-    """Дублирует логи/ошибки vkbottle (модуль logging) в bot_server.log.
+    """Дублирует логи/ошибки vkbottle (модуль logging) в logs/info.log и logs/error.log.
 
-    Раньше трейсбеки падали только в journalctl/systemd; здесь цепляем обработчик
-    на корневой логгер, чтобы всё писало ещё и в наш файл.
+    Раньше трейсбеки падали только в journalctl/systemd; здесь цепляем обработчики
+    на корневой логгер: `>= ERROR` → error.log, остальное → info.log.
     """
     global _mirrored
     if _mirrored:
@@ -42,9 +42,22 @@ def _mirror_logging_to_file() -> None:
     _mirrored = True
     try:
         root = logging.getLogger()
-        handler = logging.FileHandler("bot_server.log", encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-        root.addHandler(handler)
+        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+        class _BelowError(logging.Filter):
+            def filter(self, record):
+                return record.levelno < logging.ERROR
+
+        info_handler = logging.FileHandler(config_manager.INFO_LOG_FILE, encoding="utf-8")
+        info_handler.setFormatter(fmt)
+        info_handler.addFilter(_BelowError())
+
+        err_handler = logging.FileHandler(config_manager.ERROR_LOG_FILE, encoding="utf-8")
+        err_handler.setFormatter(fmt)
+        err_handler.setLevel(logging.ERROR)
+
+        root.addHandler(info_handler)
+        root.addHandler(err_handler)
         root.setLevel(logging.INFO)
     except Exception as e:
         print(f"[mirror] Не удалось настроить файловый лог: {e}", flush=True)
