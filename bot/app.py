@@ -16,8 +16,6 @@ except ImportError:  # не Linux (напр. Windows)
 from bot import config as config_manager
 from bot import listener as shell_worker
 from bot import render as terminal_render
-from io import BytesIO
-from PIL import Image as _PILImage
 from vkbottle.bot import Bot, Message
 
 # Универсальная загрузка фото/документов: в vkbottle 4.7+ отдельные классы, раньше — MessageUploader
@@ -72,11 +70,14 @@ TOKEN, ALLOWED_ADMINS = config_manager.load_secret_config()
 bot = Bot(token=TOKEN)
 user_sessions = {}
 
-# Фото-загрузчик: дефолтное имя picture.jpg — именно с ним ls -la успешно загружалось фото.
-photo_uploader = _PhotoUploader(bot.api)
-# Фолбэк-загрузчик картинки как документа: имя .jpg, чтобы VK показывал его как изображение.
+# Фото-загрузчик: имя файла picture.png — так VK распознаёт PNG (рендер отдаёт PNG).
 try:
-    doc_uploader = _DocUploader(bot.api, attachment_name="output.jpg") if _DocUploader is not None else None
+    photo_uploader = _PhotoUploader(bot.api, attachment_name="picture.png")
+except TypeError:
+    photo_uploader = _PhotoUploader(bot.api)
+# Фолбэк-загрузчик картинки как документа: имя .png, чтобы VK показывал его как изображение.
+try:
+    doc_uploader = _DocUploader(bot.api, attachment_name="output.png") if _DocUploader is not None else None
 except TypeError:
     doc_uploader = _DocUploader(bot.api) if _DocUploader is not None else None
 
@@ -498,9 +499,9 @@ async def _send_image_to_user(user_id: int, upload_bytes: bytes, caption: str = 
     if doc_uploader is not None:
         try:
             # title задаёт имя файла у VK: по умолчанию vkbottle ставит "doc.txt" —
-            # отсюда и «странный» .txt. Даём нормальное имя с .jpg (содержимое — JPEG).
+            # отсюда и «странный» .txt. Даём нормальное имя с .png (содержимое — PNG).
             doc_attachment = await asyncio.wait_for(
-                doc_uploader.upload(file_source=upload_bytes, peer_id=user_id, title="art.jpg"), timeout=30
+                doc_uploader.upload(file_source=upload_bytes, peer_id=user_id, title="art.png"), timeout=30
             )
             config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена документом")
             await bot.api.messages.send(
@@ -539,11 +540,8 @@ async def _render_session_image(user_id: int, raw_bytes: bytes):
     # слоем, поэтому блочная графика (QR и т.п.) внизу не портится.
     header = f"\x1b[1;32m{run_user}@{host}\x1b[0m:\x1b[1;34m{path}\x1b[0m{prompt} {cmd}"
     try:
-        png = terminal_render.render_stacked(header, raw_bytes or b"")
-        img = _PILImage.open(BytesIO(png)).convert("RGB")
-        jpeg_buf = BytesIO()
-        img.save(jpeg_buf, format="JPEG", quality=90)
-        upload_bytes = jpeg_buf.getvalue()
+        # Рендер сразу отдаёт PNG — отправляем его как есть (без потерь, чёткий текст/QR).
+        upload_bytes = terminal_render.render_stacked(header, raw_bytes or b"")
     except Exception as e:
         config_manager.log_message("ERROR", f"Ошибка рендера изображения из сессии: {e}")
         await bot.api.messages.send(peer_id=user_id, message=f"Не удалось отрисовать картинку: {e}", random_id=0)
