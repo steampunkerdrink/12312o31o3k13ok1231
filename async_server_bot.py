@@ -343,9 +343,10 @@ async def get_or_create_session(user_id: int, api):
     shell_worker.user_interactive_mode[user_id] = False
     
     await asyncio.sleep(0.3)
-    # PS1='' — убираем приглашение bash: иначе вывод команды без завершающего \n
-    # слипается с промптом ("true" + "root@host:...#") и теряется при очистке.
-    init_cmd = "stty -echo\nstty -icanon\nPS1=''\nPS2=''\necho ''\nprintf '___END_OF_COMMAND___:%s:%s\\n' 0 \"$PWD\"\n"
+    # Инициализация сессии. PS1='' — убираем приглашение bash (иначе вывод без \n
+    # слипается с промптом). Маркер здесь НЕ печатаем: иначе слушатель примет его
+    # за завершение команды и пришлёт лишний заголовок пути (дубликат).
+    init_cmd = "stty -echo\nstty -icanon\nPS1=''\nPS2=''\n"
     writer.write(init_cmd.encode("utf-8"))
     await writer.drain()
     return user_sessions[user_id]
