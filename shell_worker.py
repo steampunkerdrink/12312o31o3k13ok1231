@@ -225,18 +225,23 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                     current_time = asyncio.get_event_loop().time()
                     base_delay = config_manager.get_dynamic_delay()
                     
-                    is_active_interactive = user_interactive_mode.get(user_id, False) or (len(buffer) > 0 and (current_time - last_send_time) >= base_delay)
+                    # ИСПРАВЛЕНО (v5.10.4): плашку "INTERACTIVE MODE" ставим ТОЛЬКО когда
+                    # пользователь реально в интерактивном режиме. Раньше сюда подмешивалось
+                    # «буфер ждал >= base_delay», из-за чего любой медленный вывод (напр. bg:)
+                    # ошибочно помечался как интерактивный.
+                    really_interactive = user_interactive_mode.get(user_id, False)
+                    buffered_ready = len(buffer) > 0 and (current_time - last_send_time) >= base_delay
                     is_time_to_send = (current_time - last_send_time) >= (base_delay * current_flood_multiplier)
-                    
-                    # ИСПРАВЛЕНО (v5.2.1): Если в буфере лежит остаток логов (статистика пинга) после Ctrl+C,
-                    # мы выталкиваем её НЕМЕДЛЕННО, не затирая данные!
-                    if is_time_to_send or is_active_interactive or "statistics" in "".join(buffer).lower():
+
+                    # Если в буфере лежит остаток логов (статистика пинга) после Ctrl+C,
+                    # выталкиваем его НЕМЕДЛЕННО, не затирая данные!
+                    if is_time_to_send or buffered_ready or really_interactive or "statistics" in "".join(buffer).lower():
                         raw_chunk = "".join(buffer)
                         buffer.clear()
                         
                         clean_chunk = clean_terminal_garbage(raw_chunk)
                         if clean_chunk and _is_alive():
-                            await send_safe_message(api, user_id, clean_chunk, is_interactive=is_active_interactive)
+                            await send_safe_message(api, user_id, clean_chunk, is_interactive=really_interactive)
                             last_send_time = asyncio.get_event_loop().time()
                 
     except asyncio.CancelledError:
