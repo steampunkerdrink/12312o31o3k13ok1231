@@ -131,12 +131,20 @@ async def _cleanup_sessions():
 
 
 async def _graceful_stop():
-    config_manager.log_message("INFO", "Сигнал остановки: закрываю дочерние сессии")
+    config_manager.log_message("INFO", "Сигнал остановки: закрываю сессии и останавливаю задачи")
     await _cleanup_sessions()
     try:
-        asyncio.get_running_loop().stop()
-    except Exception:
-        pass
+        loop = asyncio.get_running_loop()
+        current = asyncio.current_task()
+        pending = [t for t in asyncio.all_tasks(loop) if t is not current]
+        for t in pending:
+            t.cancel()
+        if pending:
+            # Дожидаемся отмены, иначе asyncio ругается: "Task was destroyed but it is pending!"
+            await asyncio.gather(*pending, return_exceptions=True)
+        loop.stop()
+    except Exception as e:
+        config_manager.log_message("ERROR", f"Ошибка при остановке: {e}")
 
 
 async def _install_signal_handlers():
