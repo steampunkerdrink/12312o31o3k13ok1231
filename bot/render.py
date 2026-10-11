@@ -92,11 +92,17 @@ class _Cell:
         self.bg = bg
 
 
-def _parse(text: str, light: bool = False):
-    """Разбор вывода в список строк; каждая строка — список _Cell."""
+def _parse(text: str, light: bool = False, max_cols: int = 200):
+    """Разбор вывода в список строк; каждая строка — список _Cell.
+
+    Эмулирует терминал: `\\r` возвращает курсор в начало строки (перезапись) — это
+    сворачивает прогресс-бары (git/apt/wget), иначе строка распухает в ширину и
+    картинка становится гигантской. Строки длиннее `max_cols` переносятся.
+    """
     fg, bg = _defaults(light)
     inverse = False
     rows, cur = [], []
+    col = 0
     for m in TOKEN.finditer(text):
         grp = m.group(0)
         if grp.startswith("\x1b"):
@@ -147,10 +153,23 @@ def _parse(text: str, light: bool = False):
         if grp == "\n":
             rows.append(cur)
             cur = []
+            col = 0
             continue
         if grp == "\r":
+            # Возврат каретки: дальнейшие символы перезаписывают строку с начала
+            col = 0
             continue
-        cur.append(_Cell(grp, fg if not inverse else bg, bg if not inverse else fg))
+        # Перенос слишком длинной строки (защита от огромных картинок)
+        if col >= max_cols:
+            rows.append(cur)
+            cur = []
+            col = 0
+        cell = _Cell(grp, fg if not inverse else bg, bg if not inverse else fg)
+        if col < len(cur):
+            cur[col] = cell
+        else:
+            cur.append(cell)
+        col += 1
     if cur:
         rows.append(cur)
     return rows
