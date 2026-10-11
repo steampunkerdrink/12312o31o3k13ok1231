@@ -36,7 +36,7 @@ INFO_LOG_FILE = os.path.join(LOG_DIR, "info.log")
 ERROR_LOG_FILE = os.path.join(LOG_DIR, "error.log")
 
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.11.5"
+VERSION = "5.11.6"
 
 dynamic_commands_map = {}
 

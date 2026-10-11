@@ -16,6 +16,8 @@ except ImportError:  # не Linux (напр. Windows)
 from bot import config as config_manager
 from bot import listener as shell_worker
 from bot import render as terminal_render
+from io import BytesIO
+from PIL import Image as _PILImage
 from vkbottle.bot import Bot, Message
 
 # Универсальная загрузка фото/документов: в vkbottle 4.7+ отдельные классы, раньше — MessageUploader
@@ -70,12 +72,16 @@ TOKEN, ALLOWED_ADMINS = config_manager.load_secret_config()
 bot = Bot(token=TOKEN)
 user_sessions = {}
 
-# Фото-загрузчик: имя файла picture.png — так VK распознаёт PNG (рендер отдаёт PNG).
+# Фото-загрузчики: PNG — основной; JPEG — фолбэк, если фото-сервер VK не примет PNG.
 try:
     photo_uploader = _PhotoUploader(bot.api, attachment_name="picture.png")
 except TypeError:
     photo_uploader = _PhotoUploader(bot.api)
-# Фолбэк-загрузчик картинки как документа: имя .png, чтобы VK показывал его как изображение.
+try:
+    photo_uploader_jpg = _PhotoUploader(bot.api, attachment_name="picture.jpg")
+except TypeError:
+    photo_uploader_jpg = None
+# Фолбэк-загрузчик картинки как документа (имя задаём через title при загрузке).
 try:
     doc_uploader = _DocUploader(bot.api, attachment_name="output.png") if _DocUploader is not None else None
 except TypeError:
@@ -476,32 +482,52 @@ async def get_or_create_session(user_id: int, api):
     return user_sessions[user_id]
 
 
-async def _send_image_to_user(user_id: int, upload_bytes: bytes, caption: str = ""):
-    """Отправляет картинку в VK: фото (с ретраями), при неудаче — документом."""
+async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = ""):
+    """Отправляет картинку в VK.
+
+    Каскад: фото как PNG → фото как JPEG (если VK не принял PNG) → документ
+    (с правильным расширением, не `doc.txt`).
+    """
+    # Заранее готовим JPEG-вариант — им подстрахуемся, если фото-сервер не примет PNG.
+    jpeg_bytes = None
+    try:
+        img = _PILImage.open(BytesIO(image_bytes)).convert("RGB")
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        jpeg_bytes = buf.getvalue()
+    except Exception as e:
+        config_manager.log_message("WARNING", f"Не удалось сделать JPEG-вариант: {e}")
+
+    attempts = []                        # (uploader, bytes, tries)
+    if photo_uploader is not None:
+        attempts.append((photo_uploader, image_bytes, 1))          # PNG, 1 попытка
+    if jpeg_bytes is not None and photo_uploader_jpg is not None:
+        attempts.append((photo_uploader_jpg, jpeg_bytes, 3))       # JPEG, с ретраями
+
     photo_err = None
-    for _attempt in range(1, 4):
-        try:
-            if hasattr(photo_uploader, "upload"):
-                attachment = await asyncio.wait_for(
-                    photo_uploader.upload(file_source=upload_bytes, peer_id=user_id), timeout=30
-                )
-            else:
-                attachment = await asyncio.wait_for(
-                    photo_uploader.upload_photos(file_source=upload_bytes, peer_id=user_id), timeout=30
-                )
-            await bot.api.messages.send(peer_id=user_id, message=caption, attachment=attachment, random_id=0)
-            config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена фото")
-            return
-        except Exception as e_photo:
-            photo_err = e_photo
-            await asyncio.sleep(1)
+    for uploader, data, tries in attempts:
+        for _attempt in range(1, tries + 1):
+            try:
+                if hasattr(uploader, "upload"):
+                    attachment = await asyncio.wait_for(
+                        uploader.upload(file_source=data, peer_id=user_id), timeout=30
+                    )
+                else:
+                    attachment = await asyncio.wait_for(
+                        uploader.upload_photos(file_source=data, peer_id=user_id), timeout=30
+                    )
+                await bot.api.messages.send(peer_id=user_id, message=caption, attachment=attachment, random_id=0)
+                config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена фото")
+                return
+            except Exception as e_photo:
+                photo_err = e_photo
+                await asyncio.sleep(1)
 
     if doc_uploader is not None:
+        doc_bytes, doc_title = (jpeg_bytes, "art.jpg") if jpeg_bytes is not None else (image_bytes, "art.png")
         try:
-            # title задаёт имя файла у VK: по умолчанию vkbottle ставит "doc.txt" —
-            # отсюда и «странный» .txt. Даём нормальное имя с .png (содержимое — PNG).
             doc_attachment = await asyncio.wait_for(
-                doc_uploader.upload(file_source=upload_bytes, peer_id=user_id, title="art.png"), timeout=30
+                doc_uploader.upload(file_source=doc_bytes, peer_id=user_id, title=doc_title), timeout=30
             )
             config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена документом")
             await bot.api.messages.send(
