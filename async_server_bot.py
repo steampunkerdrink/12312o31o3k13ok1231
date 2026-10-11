@@ -7,8 +7,12 @@ import signal
 import time
 try:
     import pty
-except ImportError:  # не Linux (напр. Windows) — цвета в art будут недоступны
+    import fcntl
+    import termios
+    import struct
+except ImportError:  # не Linux (напр. Windows)
     pty = None
+    fcntl = termios = struct = None
 import config_manager
 import shell_worker
 import terminal_render
@@ -343,6 +347,19 @@ async def build_status_text(user_id: int) -> str:
     return "\n".join(lines)
 
 
+def _pty_preexec():
+    """Дочерний процесс: новая сессия + назначить PTY управляющим терминалом.
+
+    Без TIOCSCTTY интерактивные программы (ssh, htop, vim…) теряют controlling tty.
+    """
+    os.setsid()
+    if fcntl is not None:
+        try:
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+        except Exception:
+            pass
+
+
 async def get_or_create_session(user_id: int, api):
     if user_id in user_sessions:
         session = user_sessions[user_id]
@@ -351,8 +368,16 @@ async def get_or_create_session(user_id: int, api):
     config_manager.log_message("INFO", f"Запуск новой интерактивной bash-сессии для ID {user_id}")
     
     master_fd, slave_fd = os.openpty()
+    # Размер окна PTY (иначе 0x0 — ломает ssh/htop/vim) 
+    if struct is not None:
+        try:
+            fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 160, 0, 0))
+        except Exception:
+            pass
     process = await asyncio.create_subprocess_exec(
-        "/bin/bash", stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, preexec_fn=os.setsid
+        "/bin/bash", stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+        preexec_fn=_pty_preexec,
+        env={**os.environ, "TERM": "xterm-256color"},
     )
     os.close(slave_fd)
     

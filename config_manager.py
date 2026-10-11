@@ -12,7 +12,7 @@ KEYBOARD_CUSTOM_FILE = "keyboard_custom.txt"
 IDLE_FILE = "idle_timeout.txt"
 
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.8.3"
+VERSION = "5.8.4"
 
 dynamic_commands_map = {}
 
