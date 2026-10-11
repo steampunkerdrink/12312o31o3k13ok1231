@@ -221,7 +221,12 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                     if not _is_alive():
                         return
                     last_activity[user_id] = time.time()
-                    if clean_text:
+                    if clean_text and len(clean_text) > 3500:
+                        # Длинный вывод: шапка отдельным сообщением, тело — нарезанными частями
+                        # (лимит текста VK 9000; send_safe_message режет по 3500 и следит за флудом)
+                        await api.messages.send(peer_id=user_id, message=path_header, keyboard=current_kb, random_id=0)
+                        await send_safe_message(api, user_id, clean_text, is_interactive=False)
+                    elif clean_text:
                         full_package = f"{path_header}\n```\n{clean_text}\n```"
                         await api.messages.send(peer_id=user_id, message=full_package, keyboard=current_kb, random_id=0)
                     else:

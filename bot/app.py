@@ -594,6 +594,59 @@ async def _resend_last_art(user_id: int, message: Message):
         await _send_image_to_user(user_id, data, caption="🔁 Последняя ART-картинка")
 
 
+# Предохранитель: не тащим в память/в VK слишком большие файлы
+SEND_MAX_BYTES = 100 * 1024 * 1024
+
+
+async def _send_file_command(user_id: int, text: str, message: Message):
+    """`send <путь>` — прислать файл с сервера в этот чат (документом, с реальным именем)."""
+    parts = text.split(None, 1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("Укажи файл: send <путь>  (например: send 1.txt)")
+        return
+    raw_path = parts[1].strip().strip('"').strip("'")
+    base = shell_worker.last_valid_path or "/"
+    path = os.path.expanduser(raw_path if os.path.isabs(raw_path) else os.path.join(base, raw_path))
+    if not os.path.exists(path):
+        await message.answer(f"Файл не найден: {path}")
+        return
+    if os.path.isdir(path):
+        await message.answer(
+            f"Это папка: {path}\nСначала упакуй, напр.: tar czf out.tgz {raw_path}  → send out.tgz"
+        )
+        return
+    if doc_uploader is None:
+        await message.answer("Загрузчик документов недоступен.")
+        return
+    try:
+        size = os.path.getsize(path)
+    except Exception:
+        size = 0
+    if size > SEND_MAX_BYTES:
+        await message.answer(f"Файл слишком большой ({_fmt_bytes(size)}); лимит {_fmt_bytes(SEND_MAX_BYTES)}.")
+        return
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except Exception as e:
+        config_manager.log_message("ERROR", f"send: чтение {path} не удалось: {e}")
+        await message.answer(f"Не удалось прочитать файл: {e}")
+        return
+    title = os.path.basename(path) or "file"
+    await _show_typing(user_id)
+    try:
+        attachment = await asyncio.wait_for(
+            doc_uploader.upload(file_source=data, peer_id=user_id, title=title), timeout=180
+        )
+        await bot.api.messages.send(
+            peer_id=user_id, message=f"📎 {title} — {_fmt_bytes(size)}", attachment=attachment, random_id=0
+        )
+        config_manager.log_message("INFO", f"Админ [{user_id}] send: {path} ({_fmt_bytes(size)})")
+    except Exception as e:
+        config_manager.log_message("ERROR", f"send {path}: {e}")
+        await message.answer(f"Не удалось отправить файл «{title}»: {e}")
+
+
 # Последняя art-команда пользователя — для подписи на картинке
 _last_art_cmd = {}
 # Флаг «прислать документом» на текущий art-запрос (команда `art:doc`)
@@ -684,6 +737,7 @@ HELP_TEXT = (
     "• art:last — повторно прислать последнюю картинку\n"
     "• art:doc <команда> — прислать результат документом (по умолчанию — фото)\n"
     "• bg: <команда> — фоновый запуск (вывод приходит по мере работы)\n"
+    "• send <файл> — прислать файл с сервера в этот чат\n"
     "• reset / сброс / exit — очистить сессию\n"
     "• 💀 Hard Reset — убить зависшую сессию\n"
     "• ctrl / ctrl+c — отправить SIGINT (прервать вывод)\n"
@@ -771,6 +825,15 @@ async def handle_message(message: Message):
     # HELP
     if lower_text in ["help", "помощь", "?", "команды", "commands", "хелп"]:
         await message.answer(f"📚 Команды бота [v{config_manager.get_version()}]\n" + HELP_TEXT)
+        return
+
+    # SEND <файл> — прислать файл с сервера в этот чат
+    if lower_text == "send" or lower_text.startswith("send "):
+        try:
+            await _send_file_command(user_id, text_input, message)
+        except Exception as e:
+            config_manager.log_message("ERROR", f"Ошибка send: {e}")
+            await message.answer(f"Ошибка отправки файла: {e}")
         return
 
     # ART-РЕЖИМ: выполнить команду и прислать результат картинкой (PNG)
