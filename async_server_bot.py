@@ -360,15 +360,12 @@ def _pty_preexec():
             pass
 
 
-async def get_or_create_session(user_id: int, api):
-    if user_id in user_sessions:
-        session = user_sessions[user_id]
-        if session["process"].returncode is None: return session
-
+async def _create_session(user_id: int, api):
+    """Создаёт новую PTY-bash сессию и возвращает её (без health-проверки)."""
     config_manager.log_message("INFO", f"Запуск новой интерактивной bash-сессии для ID {user_id}")
-    
+
     master_fd, slave_fd = os.openpty()
-    # Размер окна PTY (иначе 0x0 — ломает ssh/htop/vim) 
+    # Размер окна PTY (иначе 0x0 — ломает ssh/htop/vim)
     if struct is not None:
         try:
             fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 160, 0, 0))
@@ -380,12 +377,12 @@ async def get_or_create_session(user_id: int, api):
         env={**os.environ, "TERM": "xterm-256color"},
     )
     os.close(slave_fd)
-    
+
     loop = asyncio.get_event_loop()
     process_reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(process_reader)
     await loop.connect_read_pipe(lambda: protocol, os.fdopen(master_fd, "rb"))
-    
+
     writer_transport, writer_protocol = await loop.connect_write_pipe(
         lambda: asyncio.streams.FlowControlMixin(), os.fdopen(os.dup(master_fd), "wb")
     )
@@ -398,13 +395,13 @@ async def get_or_create_session(user_id: int, api):
     )
 
     user_sessions[user_id] = {
-        "process": process, 
-        "writer": writer, 
+        "process": process,
+        "writer": writer,
         "task": listen_task,
-        "master_fd": master_fd
+        "master_fd": master_fd,
     }
     shell_worker.user_interactive_mode[user_id] = False
-    
+
     await asyncio.sleep(0.3)
     # Инициализация сессии. PS1='' — убираем приглашение bash (иначе вывод без \n
     # слипается с промптом). Маркер здесь НЕ печатаем: иначе слушатель примет его
@@ -416,69 +413,47 @@ async def get_or_create_session(user_id: int, api):
     await writer.drain()
     return user_sessions[user_id]
 
-async def _run_capture(full_command: str, env: dict, timeout: float = 120):
-    """Выполняет команду и возвращает (raw_bytes, returncode, timed_out).
 
-    На Linux запускает в PTY, чтобы утилиты (ls, grep…) видели терминал и отдавали
-    ANSI-цвета — их потом отрисует terminal_render в цветную картинку.
-    """
-    if pty is None:
-        proc = await asyncio.create_subprocess_exec(
-            "/bin/bash", "-c", full_command,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=env,
-        )
-        try:
-            raw, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            return raw or b"", proc.returncode, False
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return b"", None, True
-
-    master, slave = pty.openpty()
-    proc = await asyncio.create_subprocess_exec(
-        "/bin/bash", "-c", full_command,
-        stdin=slave, stdout=slave, stderr=slave,
-        env=env, preexec_fn=os.setsid,
-    )
-    os.close(slave)
-    loop = asyncio.get_event_loop()
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    await loop.connect_read_pipe(lambda: protocol, os.fdopen(master, "rb"))
-
-    data = bytearray()
-    timed_out = False
+async def _session_responds(user_id: int, writer) -> bool:
+    """Health-check: bash живой и реально читает наш fd? Побочный вывод зонда сбрасываем."""
+    shell_worker.session_ready.discard(user_id)
+    shell_worker.discard_output(user_id)
     try:
-        while True:
-            try:
-                chunk = await asyncio.wait_for(reader.read(65536), timeout=timeout)
-            except asyncio.TimeoutError:
-                timed_out = True
-                break
-            except OSError:
-                # PTY: при закрытии slave дочерним процессом чтение master даёт EIO.
-                # Это штатный конец вывода, а не ошибка.
-                break
-            if not chunk:
-                break
-            data.extend(chunk)
-    finally:
-        try:
-            if proc.returncode is None:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception:
-            pass
-        try:
-            await proc.wait()
-        except Exception:
-            pass
-    return bytes(data), proc.returncode, timed_out
+        writer.write(b"echo __SESS_READY__\n")
+        await writer.drain()
+    except Exception as e:
+        config_manager.log_message("ERROR", f"health-check ID {user_id}: запись не удалась: {e}")
+        shell_worker.discard_output(user_id)
+        return False
+    for _ in range(10):  # до ~2 секунд на ответ
+        await asyncio.sleep(0.2)
+        if user_id in shell_worker.session_ready:
+            shell_worker.session_ready.discard(user_id)
+            shell_worker.discard_output(user_id)
+            return True
+    shell_worker.discard_output(user_id)
+    return False
+
+
+async def get_or_create_session(user_id: int, api):
+    """Возвращает активную сессию, при необходимости создаёт (с health-check и 1 повтором)."""
+    if user_id in user_sessions:
+        session = user_sessions[user_id]
+        if session["process"].returncode is None:
+            return session
+    for attempt in range(2):
+        await _create_session(user_id, api)
+        if await _session_responds(user_id, user_sessions[user_id]["writer"]):
+            return user_sessions[user_id]
+        config_manager.log_message(
+            "WARNING",
+            f"ID {user_id}: сессия не ответила на health-check (попытка {attempt + 1}/2) — пересоздаю",
+        )
+        await _teardown_session(user_id)
+        await asyncio.sleep(0.3)
+    if user_id not in user_sessions:
+        await _create_session(user_id, api)
+    return user_sessions[user_id]
 
 
 async def _send_image_to_user(user_id: int, upload_bytes: bytes, caption: str = ""):
@@ -527,6 +502,10 @@ async def _send_image_to_user(user_id: int, upload_bytes: bytes, caption: str = 
     )
 
 
+# Последняя art-команда пользователя — для подписи на картинке
+_last_art_cmd = {}
+
+
 async def _render_session_image(user_id: int, raw_bytes: bytes):
     """Callback из shell_worker: рендерит сырой вывод сессии (с ANSI) в картинку и шлёт в VK."""
     try:
@@ -539,7 +518,14 @@ async def _render_session_image(user_id: int, raw_bytes: bytes):
         config_manager.log_message("ERROR", f"Ошибка рендера изображения из сессии: {e}")
         await bot.api.messages.send(peer_id=user_id, message=f"Не удалось отрисовать картинку: {e}", random_id=0)
         return
-    await _send_image_to_user(user_id, upload_bytes)
+    # Подпись-заголовок сверху картинки: user@host:path# <команда>
+    run_user = getattr(shell_worker, "RUN_USER", "root")
+    host = getattr(shell_worker, "HOSTNAME", "host")
+    path = shell_worker.last_valid_path or "/"
+    prompt = "$" if run_user != "root" else "#"
+    cmd = _last_art_cmd.get(user_id, "")
+    caption = f"{run_user}@{host}:{path}{prompt} {cmd}".strip()
+    await _send_image_to_user(user_id, upload_bytes, caption=caption)
 
 
 shell_worker.image_renderer = _render_session_image
@@ -580,12 +566,50 @@ async def run_as_art(user_id: int, command: str, message: Message):
         return
     config_manager.log_message("INFO", f"Админ [{user_id}] art-выполнение: {command}")
     await _show_typing(user_id)
+    _last_art_cmd[user_id] = command
     await _art_via_session(user_id, command)
 
 
+HELP_TEXT = (
+    "• обычная команда — выполняется в живой PTY-сессии\n"
+    "• art: <команда> — результат картинкой (с цветами)\n"
+    "• art:bg dark|light|auto — фон картинки · art:font N — размер шрифта\n"
+    "• bg: <команда> — фоновый запуск (вывод приходит по мере работы)\n"
+    "• reset / сброс / exit — очистить сессию\n"
+    "• 💀 Hard Reset — убить зависшую сессию\n"
+    "• ctrl / ctrl+c — отправить SIGINT (прервать вывод)\n"
+    "• status / статус — диагностика бота/сессии/сервера\n"
+    "• 🖼 ART — все команды картинкой · 📄 Текст — вернуть текст"
+)
+
+
 async def handle_art_command(user_id: int, text: str, message: Message):
-    """Обработчик префикса «art:» — всегда рендерит результат картинкой."""
+    """Обработчик префикса «art:» — картинка; есть и команды настройки рендера."""
     cmd = text.split(":", 1)[1].strip()
+    low = cmd.strip().lower()
+
+    # Настройки рендера (не выполняются как команды в сессии)
+    if low in ("light", "bg light", "bg white", "white"):
+        terminal_render.configure(bg="light")
+        await message.answer("🖼 Фон art-картинки: светлый. Вернуть тёмный: art:bg dark")
+        return
+    if low in ("dark", "bg dark", "bg auto", "auto"):
+        terminal_render.configure(bg="dark")
+        await message.answer("🖼 Фон art-картинки: тёмный. Светлый: art:bg light")
+        return
+    if low == "bg":
+        await message.answer(f"🖼 Текущий фон art: {terminal_render.CONFIG['bg']} (art:bg dark|light|auto)")
+        return
+    if low == "font" or low.startswith("font "):
+        parts = low.split()
+        if len(parts) >= 2 and parts[1].isdigit():
+            n = int(parts[1])
+            terminal_render.configure(font_size=n)
+            await message.answer(f"🔠 Размер шрифта art: {n} (текущий {terminal_render.CONFIG['font_size']})")
+        else:
+            await message.answer(f"🔠 Текущий размер шрифта art: {terminal_render.CONFIG['font_size']}. Пример: art:font 20")
+        return
+
     await run_as_art(user_id, cmd, message)
 
 
@@ -621,6 +645,11 @@ async def handle_message(message: Message):
             await message.answer(f"Ошибка статуса: {e}")
         return
 
+    # HELP
+    if lower_text in ["help", "помощь", "?", "команды", "commands", "хелп"]:
+        await message.answer(f"📚 Команды бота [v{config_manager.get_version()}]\n" + HELP_TEXT)
+        return
+
     # ART-РЕЖИМ: выполнить команду и прислать результат картинкой (PNG)
     if text_input.lower().startswith("art:"):
         try:
@@ -628,6 +657,23 @@ async def handle_message(message: Message):
         except Exception as e:
             config_manager.log_message("ERROR", f"Ошибка art-обработки: {e}")
             await message.answer(f"Ошибка при выполнении: {e}")
+        return
+
+    # ФОНОВЫЙ ЗАПУСК: bg:<команда> — не держит чат, вывод приходит по мере работы
+    if text_input.lower().startswith("bg:"):
+        bg_cmd = text_input.split(":", 1)[1].strip()
+        if not bg_cmd:
+            await message.answer("Пустая команда. Пример: bg: apt update")
+            return
+        try:
+            session = await get_or_create_session(user_id, bot.api)
+            await session["writer"].write((f"( {bg_cmd} ) &\n").encode("utf-8"))
+            await session["writer"].drain()
+            config_manager.log_message("INFO", f"Админ [{user_id}] bg-запуск: {bg_cmd}")
+            await message.answer(f"▶️ Фон: `{bg_cmd}`. Вывод появится в чате по мере работы.")
+        except Exception as e:
+            config_manager.log_message("ERROR", f"Ошибка bg-запуска: {e}")
+            await message.answer(f"❌ Ошибка фонового запуска: {e}")
         return
 
     current_kb = config_manager.generate_dynamic_keyboard()

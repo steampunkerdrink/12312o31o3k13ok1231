@@ -52,3 +52,16 @@ Then reload systemd, enable the service, and start it:
     sudo systemctl daemon-reload
     sudo systemctl enable vk-interactive-bot
     sudo systemctl start vk-interactive-bot
+
+## Available commands (in VK chat)
+
+- normal command — runs in a live PTY bash session
+- `art: <command>` — run in the active session and send result as an image (colors!)
+  - `art:bg dark|light|auto` — image background; `art:font N` — font size
+- `bg: <command>` — run in background; output arrives in chat as it is produced
+- `reset` / `сброс` / `exit` — reset the session
+- `💀 Hard Reset` — kill a stuck session (new one is created on the next command)
+- `ctrl` / `ctrl+c` — send SIGINT to interrupt output
+- `status` / `статус` — bot/session/server diagnostics
+- `🖼 ART` — all commands as images; `📄 Текст` — back to text
+- `help` / `помощь` / `?` — this list

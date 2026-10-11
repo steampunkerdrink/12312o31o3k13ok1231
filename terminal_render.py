@@ -42,6 +42,26 @@ PALETTE = {
 DEFAULT_FG = (235, 235, 235)
 DEFAULT_BG = (18, 18, 24)
 
+# Рабочий конфиг рендера. Меняется текстовыми командами боту: `art:bg dark|light|auto`, `art:font N`.
+CONFIG = {"bg": "dark", "font_size": 17}
+LIGHT_FG = (24, 24, 28)
+LIGHT_BG = (245, 245, 247)
+
+
+def configure(bg=None, font_size=None):
+    """Обновляет параметры рендера. bg: 'dark' | 'light' | 'auto'; font_size: int."""
+    if bg in ("dark", "light", "auto"):
+        CONFIG["bg"] = bg
+    if isinstance(font_size, int) and 8 <= font_size <= 48:
+        CONFIG["font_size"] = font_size
+
+
+def _defaults(light: bool):
+    """Возвращает (fg, bg) под тему."""
+    if light:
+        return LIGHT_FG, LIGHT_BG
+    return DEFAULT_FG, DEFAULT_BG
+
 # Отступ (поля) вокруг содержимого картинки, в пикселях
 PADDING = 24
 
@@ -72,9 +92,9 @@ class _Cell:
         self.bg = bg
 
 
-def _parse(text: str):
+def _parse(text: str, light: bool = False):
     """Разбор вывода в список строк; каждая строка — список _Cell."""
-    fg, bg = DEFAULT_FG, DEFAULT_BG
+    fg, bg = _defaults(light)
     inverse = False
     rows, cur = [], []
     for m in TOKEN.finditer(text):
@@ -87,7 +107,7 @@ def _parse(text: str):
                 while i < n:
                     c = nums[i]
                     if c == 0:
-                        fg, bg, inverse = DEFAULT_FG, DEFAULT_BG, False
+                        fg, bg, inverse = (*_defaults(light), False)
                     elif c == 7:
                         inverse = True
                     elif c == 27:
@@ -101,9 +121,9 @@ def _parse(text: str):
                     elif 100 <= c <= 107:
                         bg = PALETTE[c - 100 + 8]
                     elif c == 39:
-                        fg = DEFAULT_FG
+                        fg = _defaults(light)[0]
                     elif c == 49:
-                        bg = DEFAULT_BG
+                        bg = _defaults(light)[1]
                     elif c in (38, 48):
                         kind = "fg" if c == 38 else "bg"
                         if i + 1 < n and nums[i + 1] == 5 and i + 2 < n:
@@ -151,13 +171,14 @@ def _cell_fill(ch: str):
     return (True, True)  # █ и прочие — заполняем полностью
 
 
-def _render_art(rows, cell=12):
+def _render_art(rows, light: bool = False, cell=12):
+    bg_color = _defaults(light)[1]
     ncols = max((len(r) for r in rows), default=0)
     nrows = len(rows)
     if ncols == 0 or nrows == 0:
-        return Image.new("RGB", (4, 4), DEFAULT_BG)
+        return Image.new("RGB", (4, 4), bg_color)
     w, h = ncols * cell, nrows * 2 * cell
-    img = Image.new("RGB", (w, h), DEFAULT_BG)
+    img = Image.new("RGB", (w, h), bg_color)
     draw = ImageDraw.Draw(img)
     y = 0
     for row in rows:
@@ -186,8 +207,9 @@ def _load_font(size=17):
     return ImageFont.load_default()
 
 
-def _render_text(rows):
-    font = _load_font()
+def _render_text(rows, light: bool = False, font_size: int = 17):
+    font = _load_font(font_size)
+    bg_color = _defaults(light)[1]
     cell_w = int(font.getlength("M")) or 10
     try:
         ascent, descent = font.getmetrics()
@@ -196,7 +218,7 @@ def _render_text(rows):
         line_h = int(cell_w * 1.4)
     ncols = max((len(r) for r in rows), default=0)
     nrows = len(rows)
-    img = Image.new("RGB", (max(ncols * cell_w, 1), max(nrows * line_h, 1)), DEFAULT_BG)
+    img = Image.new("RGB", (max(ncols * cell_w, 1), max(nrows * line_h, 1)), bg_color)
     draw = ImageDraw.Draw(img)
     y = 0
     for row in rows:
@@ -219,12 +241,18 @@ def _with_padding(img, pad: int = PADDING):
     return out
 
 
-def render(source) -> bytes:
-    """Принимает bytes или str, возвращает PNG bytes."""
+def render(source, light: bool = None, font_size: int = None) -> bytes:
+    """Принимает bytes или str, возвращает PNG bytes. Опционально light/bg и font_size."""
+    if light is not None:
+        configure(bg="light" if light else "dark")
+    if font_size is not None:
+        configure(font_size=font_size)
+    use_light = CONFIG["bg"] == "light"
+    fs = CONFIG["font_size"]
     text = source.decode("utf-8", "replace") if isinstance(source, bytes) else source
-    rows = _parse(text)
+    rows = _parse(text, light=use_light)
     is_art = any(c.char in BLOCK_CHARS for row in rows for c in row)
-    img = _render_art(rows) if is_art else _render_text(rows)
+    img = _render_art(rows, light=use_light) if is_art else _render_text(rows, light=use_light, font_size=fs)
     img = _with_padding(img)
     buf = BytesIO()
     img.save(buf, format="PNG")

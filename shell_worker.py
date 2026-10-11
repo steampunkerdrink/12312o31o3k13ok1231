@@ -21,6 +21,17 @@ session_capture_requests = {}
 session_capture_buf = {}
 image_renderer = None  # async callable(user_id, raw_bytes), назначается из async_server_bot
 
+# Буфер накопленного вывода каждого пользователя. Выносим в dict, чтобы можно было
+# сбрасывать его (discard_output) — для health-check новой сессии и стартового промпта.
+output_buffers = {}
+# Сессии, подтвердившие живость на health-check (зонд __SESS_READY__).
+session_ready = set()
+
+
+def discard_output(user_id: int):
+    """Выбрасывает весь накопленный, но ещё не отправленный вывод пользователя."""
+    output_buffers[user_id] = []
+
 # ИСПРАВЛЕНО (v5.2.1): Кэш путей теперь монолитно живёт здесь, решая проблему Circular Import!
 last_valid_path = "/root"
 
@@ -108,7 +119,7 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
         # После reset/hard-reset токен меняется — старый слушатель больше не шлёт.
         return token is None or session_tokens.get(user_id) is token
 
-    buffer = []
+    buffer = output_buffers.setdefault(user_id, [])
     last_send_time = asyncio.get_event_loop().time()
     was_cancelled = False
 
@@ -119,6 +130,10 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                 if not chunk_bytes: break
                     
                 decoded_chunk = chunk_bytes.decode("utf-8", errors="replace")
+
+                # Health-check: сессия ответила на зонд __SESS_READY__ → подтверждаем живость
+                if b"__SESS_READY__" in chunk_bytes:
+                    session_ready.add(user_id)
 
                 # ART-захват: копим СЫРОЙ вывод (с ANSI) до маркера, потом отдаём рендереру
                 if session_capture_requests.get(user_id):
