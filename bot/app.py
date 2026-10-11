@@ -502,16 +502,33 @@ def _fail_message_with_tmp(user_id: int, data: bytes, reason: str) -> str:
     return msg
 
 
-async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = ""):
-    """Отправляет ART-картинку: фото-превью (PNG) + документ (PNG без потерь).
+async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = "", force_doc: bool = False):
+    """Отправляет ART-картинку.
 
-    Ничего не пережимаем. VK фото всё равно сожмёт у себя — поэтому дополнительно
-    отдаём оригинал документом (документы VK не трогает).
+    По умолчанию — фото-превью (инлайн); документ уходит только если фото не прошло.
+    При `force_doc=True` (команда `art:doc …`) сразу шлём документом.
     Если VK не принял ничего — кладём PNG во временный файл и сообщаем путь.
     """
+    # ── Принудительно документом (art:doc) ──
+    if force_doc and doc_uploader is not None:
+        try:
+            doc_attachment = await asyncio.wait_for(
+                doc_uploader.upload(file_source=image_bytes, peer_id=user_id, title="art.png"), timeout=30
+            )
+            await bot.api.messages.send(peer_id=user_id, message=caption, attachment=doc_attachment, random_id=0)
+            config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: документ (art:doc) отправлен")
+            return
+        except Exception as e_doc:
+            config_manager.log_message("ERROR", f"ART art:doc: документ не прошёл: {e_doc}")
+            await bot.api.messages.send(
+                peer_id=user_id,
+                message=_fail_message_with_tmp(user_id, image_bytes, f"документ: {e_doc}"),
+                random_id=0,
+            )
+            return
+
     # ── 1) Фото-превью (PNG, с ретраями) ──
     photo_err = None
-    photo_sent = False
     if photo_uploader is not None:
         for _attempt in range(1, 4):
             try:
@@ -525,40 +542,38 @@ async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = "
                     )
                 await bot.api.messages.send(peer_id=user_id, message=caption, attachment=attachment, random_id=0)
                 config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: фото-превью отправлено")
-                photo_sent = True
-                break
+                return
             except Exception as e_photo:
                 photo_err = e_photo
                 await asyncio.sleep(1)
 
-    # ── 2) Документ: оригинал PNG (VK его не пережимает) ──
+    # ── 2) Фолбэк документом — ТОЛЬКО если фото не прошло ──
     if doc_uploader is not None:
-        doc_caption = ("" if photo_sent else caption) + "\n📄 Чёткий файл (PNG, без потерь)"
         try:
             doc_attachment = await asyncio.wait_for(
                 doc_uploader.upload(file_source=image_bytes, peer_id=user_id, title="art.png"), timeout=30
             )
             await bot.api.messages.send(
-                peer_id=user_id, message=doc_caption.strip(), attachment=doc_attachment, random_id=0
+                peer_id=user_id,
+                message=(caption + f"\n⚠️ Фото не прошло ({photo_err}); отправил документом (PNG)").strip(),
+                attachment=doc_attachment, random_id=0,
             )
-            config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: документ (PNG) отправлен")
+            config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: документ (фолбэк) отправлен")
             return
         except Exception as e_doc:
             config_manager.log_message("ERROR", f"ART фото: {photo_err}; документ: {e_doc}")
-            if not photo_sent:
-                await bot.api.messages.send(
-                    peer_id=user_id,
-                    message=_fail_message_with_tmp(user_id, image_bytes, f"фото: {photo_err}; документ: {e_doc}"),
-                    random_id=0,
-                )
+            await bot.api.messages.send(
+                peer_id=user_id,
+                message=_fail_message_with_tmp(user_id, image_bytes, f"фото: {photo_err}; документ: {e_doc}"),
+                random_id=0,
+            )
             return
 
-    if not photo_sent:
-        await bot.api.messages.send(
-            peer_id=user_id,
-            message=_fail_message_with_tmp(user_id, image_bytes, f"фото: {photo_err}"),
-            random_id=0,
-        )
+    await bot.api.messages.send(
+        peer_id=user_id,
+        message=_fail_message_with_tmp(user_id, image_bytes, f"фото: {photo_err}"),
+        random_id=0,
+    )
 
 
 async def _resend_last_art(user_id: int, message: Message):
@@ -581,6 +596,8 @@ async def _resend_last_art(user_id: int, message: Message):
 
 # Последняя art-команда пользователя — для подписи на картинке
 _last_art_cmd = {}
+# Флаг «прислать документом» на текущий art-запрос (команда `art:doc`)
+_art_force_doc = {}
 
 
 async def _render_session_image(user_id: int, raw_bytes: bytes):
@@ -608,9 +625,10 @@ async def _render_session_image(user_id: int, raw_bytes: bytes):
     except Exception as e:
         config_manager.log_message("WARNING", f"Не удалось сохранить последнюю картинку: {e}")
     config_manager.log_message("INFO", f"Админ [{user_id}] art-рендер: {cmd or '(без команды)'}")
+    force_doc = _art_force_doc.get(user_id, False)
     # Отправляем под блокировкой, чтобы фото+документ ушли цельно и не перемешались с другой командой
     async with _art_lock(user_id):
-        await _send_image_to_user(user_id, upload_bytes)
+        await _send_image_to_user(user_id, upload_bytes, force_doc=force_doc)
 
 
 shell_worker.image_renderer = _render_session_image
@@ -644,14 +662,18 @@ async def _art_via_session(user_id: int, command: str):
     asyncio.create_task(_capture_timeout(user_id))
 
 
-async def run_as_art(user_id: int, command: str, message: Message):
-    """ART: выполняет команду в контексте активной сессии (в т.ч. ssh) и шлёт картинку."""
+async def run_as_art(user_id: int, command: str, message: Message, force_doc: bool = False):
+    """ART: выполняет команду в контексте активной сессии (в т.ч. ssh) и шлёт картинку.
+
+    force_doc=True — прислать результат документом (команда `art:doc`).
+    """
     if not command:
         await message.answer("Пустая команда. Пример: art: ls -la")
         return
     config_manager.log_message("INFO", f"Админ [{user_id}] art-выполнение: {command}")
     await _show_typing(user_id)
     _last_art_cmd[user_id] = command
+    _art_force_doc[user_id] = force_doc
     await _art_via_session(user_id, command)
 
 
@@ -660,6 +682,7 @@ HELP_TEXT = (
     "• art: <команда> — результат картинкой (с цветами)\n"
     "• art:bg dark|light|auto — фон картинки · art:font N — размер шрифта\n"
     "• art:last — повторно прислать последнюю картинку\n"
+    "• art:doc <команда> — прислать результат документом (по умолчанию — фото)\n"
     "• bg: <команда> — фоновый запуск (вывод приходит по мере работы)\n"
     "• reset / сброс / exit — очистить сессию\n"
     "• 💀 Hard Reset — убить зависшую сессию\n"
@@ -677,6 +700,15 @@ async def handle_art_command(user_id: int, text: str, message: Message):
     # art:last — повторно прислать последнюю сохранённую картинку
     if low == "last":
         await _resend_last_art(user_id, message)
+        return
+
+    # art:doc <команда> — выполнить и прислать результат документом (а не фото)
+    if low == "doc" or low.startswith("doc "):
+        parts = cmd.split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            await message.answer("Пример: art:doc ls -la")
+            return
+        await run_as_art(user_id, parts[1].strip(), message, force_doc=True)
         return
 
     # Настройки рендера (не выполняются как команды в сессии)
