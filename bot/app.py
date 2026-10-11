@@ -16,8 +16,6 @@ except ImportError:  # не Linux (напр. Windows)
 from bot import config as config_manager
 from bot import listener as shell_worker
 from bot import render as terminal_render
-from io import BytesIO
-from PIL import Image as _PILImage
 from vkbottle.bot import Bot, Message
 
 # Универсальная загрузка фото/документов: в vkbottle 4.7+ отдельные классы, раньше — MessageUploader
@@ -72,15 +70,11 @@ TOKEN, ALLOWED_ADMINS = config_manager.load_secret_config()
 bot = Bot(token=TOKEN)
 user_sessions = {}
 
-# Фото-загрузчики: PNG — основной; JPEG — фолбэк, если фото-сервер VK не примет PNG.
+# Фото-загрузчик: имя файла picture.png — так VK распознаёт PNG (рендер отдаёт PNG).
 try:
     photo_uploader = _PhotoUploader(bot.api, attachment_name="picture.png")
 except TypeError:
     photo_uploader = _PhotoUploader(bot.api)
-try:
-    photo_uploader_jpg = _PhotoUploader(bot.api, attachment_name="picture.jpg")
-except TypeError:
-    photo_uploader_jpg = None
 # Фолбэк-загрузчик картинки как документа (имя задаём через title при загрузке).
 try:
     doc_uploader = _DocUploader(bot.api, attachment_name="output.png") if _DocUploader is not None else None
@@ -483,71 +477,59 @@ async def get_or_create_session(user_id: int, api):
 
 
 async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = ""):
-    """Отправляет картинку в VK.
+    """Отправляет ART-картинку: фото-превью (PNG) + документ (PNG без потерь).
 
-    Каскад: фото как PNG → фото как JPEG (если VK не принял PNG) → документ
-    (с правильным расширением, не `doc.txt`).
+    Ничего не пережимаем. VK фото всё равно сожмёт у себя — поэтому дополнительно
+    отдаём оригинал документом (документы VK не трогает).
     """
-    # Заранее готовим JPEG-вариант — им подстрахуемся, если фото-сервер не примет PNG.
-    jpeg_bytes = None
-    try:
-        img = _PILImage.open(BytesIO(image_bytes)).convert("RGB")
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=90)
-        jpeg_bytes = buf.getvalue()
-    except Exception as e:
-        config_manager.log_message("WARNING", f"Не удалось сделать JPEG-вариант: {e}")
-
-    attempts = []                        # (uploader, bytes, tries)
-    if photo_uploader is not None:
-        attempts.append((photo_uploader, image_bytes, 1))          # PNG, 1 попытка
-    if jpeg_bytes is not None and photo_uploader_jpg is not None:
-        attempts.append((photo_uploader_jpg, jpeg_bytes, 3))       # JPEG, с ретраями
-
+    # ── 1) Фото-превью (PNG, с ретраями) ──
     photo_err = None
-    for uploader, data, tries in attempts:
-        for _attempt in range(1, tries + 1):
+    photo_sent = False
+    if photo_uploader is not None:
+        for _attempt in range(1, 4):
             try:
-                if hasattr(uploader, "upload"):
+                if hasattr(photo_uploader, "upload"):
                     attachment = await asyncio.wait_for(
-                        uploader.upload(file_source=data, peer_id=user_id), timeout=30
+                        photo_uploader.upload(file_source=image_bytes, peer_id=user_id), timeout=30
                     )
                 else:
                     attachment = await asyncio.wait_for(
-                        uploader.upload_photos(file_source=data, peer_id=user_id), timeout=30
+                        photo_uploader.upload_photos(file_source=image_bytes, peer_id=user_id), timeout=30
                     )
                 await bot.api.messages.send(peer_id=user_id, message=caption, attachment=attachment, random_id=0)
-                config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена фото")
-                return
+                config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: фото-превью отправлено")
+                photo_sent = True
+                break
             except Exception as e_photo:
                 photo_err = e_photo
                 await asyncio.sleep(1)
 
+    # ── 2) Документ: оригинал PNG (VK его не пережимает) ──
     if doc_uploader is not None:
-        doc_bytes, doc_title = (jpeg_bytes, "art.jpg") if jpeg_bytes is not None else (image_bytes, "art.png")
+        doc_caption = ("" if photo_sent else caption) + "\n📄 Чёткий файл (PNG, без потерь)"
         try:
             doc_attachment = await asyncio.wait_for(
-                doc_uploader.upload(file_source=doc_bytes, peer_id=user_id, title=doc_title), timeout=30
+                doc_uploader.upload(file_source=image_bytes, peer_id=user_id, title="art.png"), timeout=30
             )
-            config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка отправлена документом")
             await bot.api.messages.send(
-                peer_id=user_id,
-                message=(caption + f"\n⚠️ Фото не прошло ({photo_err}); отправил документом").strip(),
-                attachment=doc_attachment, random_id=0,
+                peer_id=user_id, message=doc_caption.strip(), attachment=doc_attachment, random_id=0
             )
+            config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: документ (PNG) отправлен")
             return
         except Exception as e_doc:
-            config_manager.log_message("ERROR", f"Фото: {photo_err}; документ: {e_doc}")
-            await bot.api.messages.send(
-                peer_id=user_id,
-                message=f"Не удалось отправить картинку (фото: {photo_err}; документ: {e_doc}).",
-                random_id=0,
-            )
+            config_manager.log_message("ERROR", f"ART фото: {photo_err}; документ: {e_doc}")
+            if not photo_sent:
+                await bot.api.messages.send(
+                    peer_id=user_id,
+                    message=f"Не удалось отправить картинку (фото: {photo_err}; документ: {e_doc}).",
+                    random_id=0,
+                )
             return
 
-    await bot.api.messages.send(
-        peer_id=user_id, message=f"Не удалось отправить картинку (фото: {photo_err}).", random_id=0
-    )
+    if not photo_sent:
+        await bot.api.messages.send(
+            peer_id=user_id, message=f"Не удалось отправить картинку (фото: {photo_err}).", random_id=0
+        )
 
 
 # Последняя art-команда пользователя — для подписи на картинке
