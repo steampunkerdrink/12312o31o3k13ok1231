@@ -59,6 +59,7 @@ Then reload systemd, enable the service, and start it:
 - normal command — runs in a live PTY bash session
 - `art: <command>` — run in the active session and send result as an image (colors!)
   - `art:bg dark|light|auto` — image background; `art:font N` — font size
+  - `art:last` — resend the last ART image
 - `bg: <command>` — run in background; output arrives in chat as it is produced
 - `reset` / `сброс` / `exit` — reset the session
 - `💀 Hard Reset` — kill a stuck session (new one is created on the next command)

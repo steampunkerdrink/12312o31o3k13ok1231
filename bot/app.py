@@ -549,6 +549,23 @@ async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = "
         )
 
 
+async def _resend_last_art(user_id: int, message: Message):
+    """Повторно отправляет последнюю ART-картинку из tmp/art_<id>.png (команда `art:last`)."""
+    path = os.path.join(config_manager.TMP_DIR, f"art_{user_id}.png")
+    if not os.path.exists(path):
+        await message.answer("Нет сохранённой картинки — ещё не было art-вывода.")
+        return
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except Exception as e:
+        config_manager.log_message("ERROR", f"Не удалось прочитать {path}: {e}")
+        await message.answer(f"Не удалось прочитать сохранённую картинку: {e}")
+        return
+    await _show_typing(user_id)
+    await _send_image_to_user(user_id, data, caption="🔁 Последняя ART-картинка")
+
+
 # Последняя art-команда пользователя — для подписи на картинке
 _last_art_cmd = {}
 
@@ -571,6 +588,12 @@ async def _render_session_image(user_id: int, raw_bytes: bytes):
         config_manager.log_message("ERROR", f"Ошибка рендера изображения из сессии: {e}")
         await bot.api.messages.send(peer_id=user_id, message=f"Не удалось отрисовать картинку: {e}", random_id=0)
         return
+    # Сохраняем последнюю картинку — её повторно пришлёт команда `art:last`.
+    try:
+        with open(os.path.join(config_manager.TMP_DIR, f"art_{user_id}.png"), "wb") as f:
+            f.write(upload_bytes)
+    except Exception as e:
+        config_manager.log_message("WARNING", f"Не удалось сохранить последнюю картинку: {e}")
     await _send_image_to_user(user_id, upload_bytes)
 
 
@@ -620,6 +643,7 @@ HELP_TEXT = (
     "• обычная команда — выполняется в живой PTY-сессии\n"
     "• art: <команда> — результат картинкой (с цветами)\n"
     "• art:bg dark|light|auto — фон картинки · art:font N — размер шрифта\n"
+    "• art:last — повторно прислать последнюю картинку\n"
     "• bg: <команда> — фоновый запуск (вывод приходит по мере работы)\n"
     "• reset / сброс / exit — очистить сессию\n"
     "• 💀 Hard Reset — убить зависшую сессию\n"
@@ -633,6 +657,11 @@ async def handle_art_command(user_id: int, text: str, message: Message):
     """Обработчик префикса «art:» — картинка; есть и команды настройки рендера."""
     cmd = text.split(":", 1)[1].strip()
     low = cmd.strip().lower()
+
+    # art:last — повторно прислать последнюю сохранённую картинку
+    if low == "last":
+        await _resend_last_art(user_id, message)
+        return
 
     # Настройки рендера (не выполняются как команды в сессии)
     if low in ("light", "bg light", "bg white", "white"):
