@@ -257,3 +257,34 @@ def render(source, light: bool = None, font_size: int = None) -> bytes:
     buf = BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def render_stacked(header: str, body, light: bool = None, font_size: int = None) -> bytes:
+    """Как render(), но текстовую шапку (промпт) рисует ОТДЕЛЬНЫМ текстовым слоем НАД телом.
+
+    Нужно для блочной графики (QR от qrencode и т.п.): нельзя подмешивать текст в «арт»,
+    иначе в арт-режиме каждый символ шапки заливается блоком своего цвета.
+    """
+    if light is not None:
+        configure(bg="light" if light else "dark")
+    if font_size is not None:
+        configure(font_size=font_size)
+    use_light = CONFIG["bg"] == "light"
+    fs = CONFIG["font_size"]
+
+    body_text = body.decode("utf-8", "replace") if isinstance(body, bytes) else (body or "")
+    body_rows = _parse(body_text, light=use_light)
+    body_is_art = any(c.char in BLOCK_CHARS for row in body_rows for c in row)
+    body_img = _render_art(body_rows, light=use_light) if body_is_art else _render_text(body_rows, light=use_light, font_size=fs)
+
+    header_img = _render_text(_parse(header, light=use_light), light=use_light, font_size=fs)
+
+    bg = _defaults(use_light)[1]
+    width = max(header_img.width, body_img.width, 1)
+    out = Image.new("RGB", (width, header_img.height + body_img.height), bg)
+    out.paste(header_img, (0, 0))
+    out.paste(body_img, (0, header_img.height))
+    out = _with_padding(out)
+    buf = BytesIO()
+    out.save(buf, format="PNG")
+    return buf.getvalue()

@@ -514,11 +514,11 @@ async def _render_session_image(user_id: int, raw_bytes: bytes):
     prompt = "$" if run_user != "root" else "#"
     cmd = _last_art_cmd.get(user_id, "")
     # Промпт-заголовок рисуем прямо НА картинке (первой строкой), а не подписью в VK:
-    # зелёный user@host, синий путь, затем «#/$» и команда.
+    # зелёный user@host, синий путь, затем «#/$» и команда. Шапка — отдельным текстовым
+    # слоем, поэтому блочная графика (QR и т.п.) внизу не портится.
     header = f"\x1b[1;32m{run_user}@{host}\x1b[0m:\x1b[1;34m{path}\x1b[0m{prompt} {cmd}"
-    source = header.encode("utf-8") + b"\n" + (raw_bytes or b"")
     try:
-        png = terminal_render.render(source)
+        png = terminal_render.render_stacked(header, raw_bytes or b"")
         img = _PILImage.open(BytesIO(png)).convert("RGB")
         jpeg_buf = BytesIO()
         img.save(jpeg_buf, format="JPEG", quality=90)
