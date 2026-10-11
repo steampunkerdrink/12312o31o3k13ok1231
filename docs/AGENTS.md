@@ -59,6 +59,7 @@
 | `deploy/vk-interactive-bot.service` | Пример unit-файла для systemd |
 | `requirements.txt` | Python-зависимости |
 | `docs/CHANGELOG.md` | История изменений по версиям (обновляется при каждом релизе) |
+| `docs/IDEAS.md` | Черновики и отложенные идеи (напр. «SSH-режим») |
 
 ---
 
