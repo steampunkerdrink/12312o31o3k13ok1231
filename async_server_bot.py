@@ -409,16 +409,9 @@ async def get_or_create_session(user_id: int, api):
     # Инициализация сессии. PS1='' — убираем приглашение bash (иначе вывод без \n
     # слипается с промптом). Маркер здесь НЕ печатаем: иначе слушатель примет его
     # за завершение команды и пришлёт лишний заголовок пути (дубликат).
-    # Алиасы — чтобы ls/grep красили вывод (для ART-картинок из сессии).
-    init_cmd = (
-        "stty -echo\nstty -icanon\nPS1=''\nPS2=''\n"
-        "shopt -s expand_aliases\n"
-        "alias ls='ls --color=auto'\n"
-        "alias grep='grep --color=auto'\n"
-        "alias fgrep='fgrep --color=auto'\n"
-        "alias egrep='egrep --color=auto'\n"
-        "alias diff='diff --color=auto'\n"
-    )
+    # Алиасы НЕ хардкодим: сессия интерактивная, bash сам читает реальный ~/.bashrc,
+    # поэтому работают настоящие алиасы сервера (уважаем конфигурацию сервера).
+    init_cmd = "stty -echo\nstty -icanon\nPS1=''\nPS2=''\n"
     writer.write(init_cmd.encode("utf-8"))
     await writer.drain()
     return user_sessions[user_id]
