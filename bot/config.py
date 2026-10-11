@@ -2,17 +2,33 @@ import os
 from datetime import datetime
 from vkbottle import Keyboard, KeyboardButtonColor, Text
 
-CONFIG_FILE = "delay_config.txt"
-KEYBOARD_FILE = "keyboard_list.txt"
-SECRET_CONFIG_FILE = "bot_config.txt"
-KEYBOARD_TOGGLE_FILE = "keyboard_enable.txt"
-VERSION_FILE = "version.txt"
-INTERACTIVE_FILE = "interactive_list.txt"
-KEYBOARD_CUSTOM_FILE = "keyboard_custom.txt"
-IDLE_FILE = "idle_timeout.txt"
+# Корень проекта — папка выше пакета bot/ (там лежат requirements.txt, config/, docs/, deploy/).
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_DIR = os.path.join(BASE_DIR, "config")
+try:
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+except Exception:
+    pass
+
+
+def _cfg(name: str) -> str:
+    """Абсолютный путь к файлу конфигурации в каталоге config/."""
+    return os.path.join(CONFIG_DIR, name)
+
+
+CONFIG_FILE = _cfg("delay_config.txt")
+KEYBOARD_FILE = _cfg("keyboard_list.txt")
+SECRET_CONFIG_FILE = _cfg("bot_config.txt")
+KEYBOARD_TOGGLE_FILE = _cfg("keyboard_enable.txt")
+VERSION_FILE = _cfg("version.txt")
+INTERACTIVE_FILE = _cfg("interactive_list.txt")
+KEYBOARD_CUSTOM_FILE = _cfg("keyboard_custom.txt")
+IDLE_FILE = _cfg("idle_timeout.txt")
+ENTRYPOINT_FILE = _cfg("entrypoint.txt")
+LOG_FILE = os.path.join(BASE_DIR, "bot_server.log")
 
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.10.5"
+VERSION = "5.11.0"
 
 dynamic_commands_map = {}
 
@@ -27,7 +43,7 @@ def log_message(level: str, message: str):
     log_line = f"{timestamp} [{level}] {message}"
     print(log_line, flush=True)
     try:
-        with open("bot_server.log", "a", encoding="utf-8") as f:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(log_line + "\n")
     except Exception as e_log:
         print(f"[log_message] Не удалось записать лог в файл: {e_log}", flush=True)
@@ -48,6 +64,43 @@ def get_version() -> str:
     except Exception as e:
         log_message("ERROR", f"Не удалось прочитать {VERSION_FILE}: {e}")
         return VERSION
+
+
+def get_entrypoint() -> dict:
+    """Читает entrypoint.txt: где и как стартует bash-сессия.
+
+    Ключи: `workdir=<путь>` — стартовая папка сессии; `init=<команда>` — доп. инициализация.
+    """
+    result = {"workdir": "/root", "init": ""}
+    if not os.path.exists(ENTRYPOINT_FILE):
+        try:
+            with open(ENTRYPOINT_FILE, "w", encoding="utf-8") as f:
+                f.write(
+                    "# entrypoint.txt — где и как стартует bash-сессия бота.\n"
+                    "# workdir — стартовая рабочая папка сессии (в неё делается cd при создании)\n"
+                    "workdir=/root\n"
+                    "# init — дополнительные команды инициализации сессии (одна строка, команды через ';')\n"
+                    "init=\n"
+                )
+        except Exception as e:
+            log_message("ERROR", f"Не удалось создать {ENTRYPOINT_FILE}: {e}")
+        return result
+    try:
+        with open(ENTRYPOINT_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip().lower()
+                value = value.strip()
+                if key == "workdir" and value:
+                    result["workdir"] = value
+                elif key == "init":
+                    result["init"] = value
+    except Exception as e:
+        log_message("ERROR", f"Не удалось прочитать {ENTRYPOINT_FILE}: {e}")
+    return result
 
 def load_secret_config():
     """Считывает ТОКЕН и список ADMINS из bot_config.txt"""
@@ -175,7 +228,7 @@ def generate_dynamic_keyboard() -> str:
         return '{"buttons":[],"one_time":true}'
         
     kb = Keyboard(one_time=False, inline=False)
-    dynamic_commands_map["📴 Off"] = "echo 'false' > keyboard_enable.txt"
+    dynamic_commands_map["📴 Off"] = f"echo 'false' > {KEYBOARD_TOGGLE_FILE}"
     # Маппим аварийную кнопку хард-ресета
     dynamic_commands_map["💀 Hard Reset"] = "hard-reset"
     

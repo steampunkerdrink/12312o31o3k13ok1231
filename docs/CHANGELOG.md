@@ -7,6 +7,22 @@
 
 ---
 
+## [5.11.0] — 2026-10-11
+
+### Изменено
+- Проект разложен «по смыслу»:
+  - `bot/` — код: `config.py` (было `config_manager.py`), `listener.py` (было `shell_worker.py`),
+    `render.py` (было `terminal_render.py`), `app.py` (было `async_server_bot.py`);
+  - `config/` — все `.txt`-конфиги (включая `version.txt` и секретный `bot_config.txt`);
+  - `docs/` — README/AGENTS/CHANGELOG; `deploy/` — systemd-юнит;
+  - тонкая точка входа `run.py` (`from bot.app import main`).
+- Пути к конфигам теперь абсолютные (от корня проекта) — бот работает из любой рабочей папки.
+- Кнопка `📴 Off` пишет абсолютный путь к `config/keyboard_enable.txt` (не зависит от cwd сессии).
+
+### Добавлено
+- `config/entrypoint.txt` — где и как стартует bash-сессия: `workdir=<папка>` (стартовая папка)
+  и `init=<команда>` (доп. команды инициализации). Применяется при создании сессии.
+
 ## [5.10.5] — 2026-10-11
 
 ### Изменено

@@ -32,7 +32,7 @@
 | HTTP/асинхронность | **aiohttp** `>=3.9.0`, `asyncio` |
 | Валидация | **pydantic** `>=1.10.0` |
 | Зависимости | в `requirements.txt` |
-| Запуск | вручную (`python3 async_server_bot.py`) или через `systemd` |
+| Запуск | вручную (`python3 run.py`) или через `systemd` |
 | ОС деплоя | Linux (используется `os.openpty`, `os.setsid`, `/bin/bash`, `/root`) |
 
 ---
@@ -41,22 +41,24 @@
 
 | Файл | Назначение |
 |------|-----------|
-| `async_server_bot.py` | Точка входа. Обработка сообщений, создание/управление PTY-сессиями, маршрутизация команд |
-| `shell_worker.py` | Фоновый слушатель вывода PTY, очистка ANSI-кодов, отправка ответов в ВК с флуд-контролем |
-| `terminal_render.py` | Парсер ANSI/SGR и рендер вывода команды в PNG (для команды `art:`) |
-| `config_manager.py` | Чтение всех `.txt`-конфигов «на лету», генерация клавиатуры, маппинг кнопок |
-| `bot_config.txt` | **Секрет**: `TOKEN=...`, `ALLOWED_ADMINS=ID,ID`. В git НЕ попадает (в `.gitignore`) |
-| `bot_config.txt.example` | Шаблон секретного конфига |
-| `delay_config.txt` | Базовая задержка между сообщениями (минимальная 1.0, по умолчанию 5.0) |
-| `interactive_list.txt` | Список команд (через запятую), запускаемых в интерактивном режиме PTY |
-| `keyboard_enable.txt` | `true`/`false` — включать ли клавиатуру в VK |
-| `keyboard_list.txt` | Список кнопок клавиатуры в формате `Имя (команда)` |
-| `keyboard_custom.txt` | `true`/`false` — показывать ли пользовательские кнопки (системный ряд остаётся) |
-| `idle_timeout.txt` | Секунды простоя до авто-закрытия сессии (`0` = выключено) |
-| `version.txt` | Текущая версия бота (выводится в debug-сообщениях) |
-| `vk-interactive-bot.service` | Пример unit-файла для systemd |
+| `run.py` | Точка входа: `from bot.app import main` → запуск бота |
+| `bot/app.py` | Бот: обработка сообщений, создание/управление PTY-сессиями, маршрутизация команд, ART-пайплайн |
+| `bot/listener.py` | Фоновый слушатель вывода PTY, очистка ANSI-кодов, маркер окончания, флуд-контроль |
+| `bot/render.py` | Парсер ANSI/SGR и рендер вывода в PNG (`art:`, темы фон/шрифт) |
+| `bot/config.py` | Чтение `.txt`-конфигов «на лету», генерация клавиатуры, `log_message`, версия |
+| `config/bot_config.txt` | **Секрет**: `TOKEN=...`, `ALLOWED_ADMINS=ID,ID`. В git НЕ попадает (в `.gitignore`) |
+| `config/bot_config.txt.example` | Шаблон секретного конфига |
+| `config/entrypoint.txt` | Где/как стартует bash-сессия: `workdir=<папка>`, `init=<команда>` |
+| `config/delay_config.txt` | Базовая задержка между сообщениями (минимальная 1.0, по умолчанию 5.0) |
+| `config/interactive_list.txt` | Список команд (через запятую), запускаемых в интерактивном режиме PTY |
+| `config/keyboard_enable.txt` | `true`/`false` — включать ли клавиатуру в VK |
+| `config/keyboard_list.txt` | Список кнопок клавиатуры в формате `Имя (команда)` |
+| `config/keyboard_custom.txt` | `true`/`false` — показывать ли пользовательские кнопки (системный ряд остаётся) |
+| `config/idle_timeout.txt` | Секунды простоя до авто-закрытия сессии (`0` = выключено) |
+| `config/version.txt` | Текущая версия бота (выводится в debug-сообщениях) |
+| `deploy/vk-interactive-bot.service` | Пример unit-файла для systemd |
 | `requirements.txt` | Python-зависимости |
-| `CHANGELOG.md` | История изменений по версиям (обновляется при каждом релизе) |
+| `docs/CHANGELOG.md` | История изменений по версиям (обновляется при каждом релизе) |
 
 ---
 
@@ -79,7 +81,7 @@
                                    echo '' / echo "___END_OF_COMMAND___:$(pwd)"
                                                        │
                                                        ▼
-                                   shell_worker: чтение PTY, ANSI-очистка,
+                                   bot/listener.py: чтение PTY, ANSI-очистка,
                                    buffering, отправка в ВК (send_safe_message)
 ```
 
@@ -94,10 +96,10 @@
   `flood`/`disallowed` множитель растёт (×2.5 до 10), при успехе плавно падает (−0.5).
 - **Интерактивный режим** (`user_interactive_mode[user_id] = True`): весь вывод
   льётся потоком без маркера; включается для команд из `interactive_list.txt`.
-- **Глобальные переменные-состояние** живут в `shell_worker.py` (это осознанное
+- **Глобальные переменные-состояние** живут в `bot/listener.py` (это осознанное
   решение против circular-import): `user_interactive_mode`,
   `current_flood_multiplier`, `last_valid_path`.
-- **Токены сессий**: `shell_worker.session_tokens[user_id]` — уникальный токен
+- **Токены сессий**: `bot/listener.session_tokens[user_id]` — уникальный токен
   активного слушателя. При `reset`/`hard-reset` он снимается, поэтому «старый»
   слушатель не пришлёт запоздалый вывод уже после сброса.
 
@@ -127,22 +129,22 @@
 
 - **Язык**: комментарии и логи сообщений — **русский**. Тексты для пользователя
   в VK — тоже русский.
-- **Версионирование**: единый источник — `VERSION = "5.10.5"` в `config_manager.py`.
-  `async_server_bot.py` и `shell_worker.py` используют
-  `VERSION = config_manager.VERSION`. Файл `version.txt` читается `get_version()`
+- **Версионирование**: единый источник — `VERSION = "5.11.0"` в `bot/config.py`.
+  `bot/app.py` и `bot/listener.py` используют
+  `VERSION = config_manager.VERSION`. Файл `config/version.txt` читается `get_version()`
   на лету и может переопределять версию, показанную в заголовках путей.
   При каждом изменении функциональности повышай `VERSION` (например `5.4.0` → `5.4.1`)
   и синхронизируй `version.txt`. Каждый релиз/фикс фиксируй новым разделом
   в `CHANGELOG.md`.
-- **Единый логгер**: `log_message(level, message)` живёт в `config_manager.py`.
+- **Единый логгер**: `log_message(level, message)` живёт в `bot/config.py`.
   Используй его вместо `print()` и вместо локального логгирования. Он пишет
   в stdout и в `bot_server.log`.
 - **ART-режим**: глобальный флаг `config_manager.art_mode` (True = обычные команды
   приходят картинкой). Управляется кнопками `🖼 ART` / `📄 Текст`; проверка
   переключателей стоит в `handle_message` раньше остальных команд.
   Рендер идёт из **активной PTY-сессии**: писать команду + маркер
-  `___END_OF_COMMAND___`, а слушатель (`shell_worker`) захватывает сырой вывод (с ANSI)
-  до маркера и отдаёт в колбэк `shell_worker.image_renderer` → `_render_session_image`
+  `___END_OF_COMMAND___`, а слушатель (`bot/listener.py`) захватывает сырой вывод (с ANSI)
+  до маркера и отдаёт в колбэк `bot/listener.image_renderer` → `_render_session_image`
   → `_send_image_to_user`. Работает и для ART-режима, и для префикса `art:` (единая
   логика `_art_via_session`), поэтому отдельные `img:`-префиксы не нужны.
   Страховка — `_capture_timeout` (60 c).
@@ -166,7 +168,7 @@
 ```bash
 cd /root/vk-api
 source venv/bin/activate
-python3 async_server_bot.py        # запуск вручную
+python3 run.py                     # запуск вручную (точка входа проекта)
 # или
 sudo systemctl restart vk-interactive-bot   # через systemd
 ```

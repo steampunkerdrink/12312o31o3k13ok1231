@@ -3,8 +3,9 @@ import getpass
 import re
 import socket
 import time
-import config_manager
-from config_manager import log_message
+
+from bot import config as config_manager
+from bot.config import log_message
 
 VERSION = config_manager.VERSION
 MARKER = "___END_OF_COMMAND___"
@@ -19,7 +20,7 @@ session_tokens = {}
 # затем отдаём его в image_renderer для рендера в картинку.
 session_capture_requests = {}
 session_capture_buf = {}
-image_renderer = None  # async callable(user_id, raw_bytes), назначается из async_server_bot
+image_renderer = None  # async callable(user_id, raw_bytes), назначается из bot/app.py
 
 # Буфер накопленного вывода каждого пользователя. Выносим в dict, чтобы можно было
 # сбрасывать его (discard_output) — для health-check новой сессии и стартового промпта.

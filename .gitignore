@@ -5,7 +5,7 @@ env/
 .env
 .vkbottle/
 # Сюда мы прячем твой VK-токен и ID админа
-bot_config.txt
+config/bot_config.txt
 
 *.log
 bot_server.log

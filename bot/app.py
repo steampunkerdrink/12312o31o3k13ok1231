@@ -13,9 +13,9 @@ try:
 except ImportError:  # не Linux (напр. Windows)
     pty = None
     fcntl = termios = struct = None
-import config_manager
-import shell_worker
-import terminal_render
+from bot import config as config_manager
+from bot import listener as shell_worker
+from bot import render as terminal_render
 from io import BytesIO
 from PIL import Image as _PILImage
 from vkbottle.bot import Bot, Message
@@ -406,9 +406,15 @@ async def _create_session(user_id: int, api):
     # Инициализация сессии. PS1='' — убираем приглашение bash (иначе вывод без \n
     # слипается с промптом). Маркер здесь НЕ печатаем: иначе слушатель примет его
     # за завершение команды и пришлёт лишний заголовок пути (дубликат).
-    # Алиасы НЕ хардкодим: сессия интерактивная, bash сам читает реальный ~/.bashrc,
-    # поэтому работают настоящие алиасы сервера (уважаем конфигурацию сервера).
+    # Алиасы НЕ хардкодим: сессия интерактивная, bash сам читает реальный ~/.bashrc.
+    # Стартовую папку/инициализацию задаёт config/entrypoint.txt (v5.11.0).
+    entry = config_manager.get_entrypoint()
     init_cmd = "stty -echo\nstty -icanon\nPS1=''\nPS2=''\n"
+    if entry.get("workdir"):
+        init_cmd += f"cd {entry['workdir']}\n"
+        shell_worker.last_valid_path = entry["workdir"]
+    if entry.get("init"):
+        init_cmd += entry["init"] + "\n"
     writer.write(init_cmd.encode("utf-8"))
     await writer.drain()
     return user_sessions[user_id]
@@ -784,7 +790,12 @@ async def handle_message(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка отправки команды: {str(e)}")
 
-if __name__ == "__main__":
+def main():
+    """Точка входа бота (запускается из run.py или `python -m bot.app`)."""
     current_ver = config_manager.get_version()
     config_manager.log_message("INFO", f"Запуск модульного безопасного СТРИМ-CLI-бота (v{VERSION})...")
     bot.run()
+
+
+if __name__ == "__main__":
+    main()

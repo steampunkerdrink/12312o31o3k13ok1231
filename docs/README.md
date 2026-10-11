@@ -25,21 +25,22 @@ Setup access_token (Настройки, дополнительно, работа
 
 
 
-## Set TOKEN AND VK_USER_ID in bot_config.txt
-Set TOKEN and VK_USER_ID in bot_config.txt.
-Check the other .txt files for additional settings.
+## Set TOKEN AND VK_USER_ID in config/bot_config.txt
+Set TOKEN and VK_USER_ID in config/bot_config.txt.
+Check the other files in `config/` for additional settings.
 
-    bot_config.txt.example -> file with dummy token and vk_user_id, rename to bot-config.txt
-    delay_config.txt -> delay in seconds in when using interactive commands to avoid spamming VK_API with too many messages (default 5.0)
-    interactive_list.txt -> list of commands treated as interactive (legacy behavior)
-    keyboard_enable.txt -> true/false for inline_keyboard in VK (true by default)
-    keyboard_list.txt -> list of commands in inline_keyboard 
+    config/bot_config.txt.example -> file with dummy token and vk_user_id, rename to bot_config.txt
+    config/entrypoint.txt -> where/how the bash session starts: workdir=<dir>, init=<command>
+    config/delay_config.txt -> delay in seconds in when using interactive commands to avoid spamming VK_API with too many messages (default 5.0)
+    config/interactive_list.txt -> list of commands treated as interactive (legacy behavior)
+    config/keyboard_enable.txt -> true/false for inline_keyboard in VK (true by default)
+    config/keyboard_list.txt -> list of commands in inline_keyboard
     requirements.txt -> python dependencies
-    version.txt -> version of bot for debug purposes
+    config/version.txt -> version of bot for debug purposes
 
 ##   Run the bot manually (for testing purposes)
 	source venv/bin/activate
-	python3 async_server_bot.py
+	python3 run.py
 
 ##   Run the bot with systemd
 Create the service file:
