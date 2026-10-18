@@ -738,66 +738,93 @@ async def _upload_document(data: bytes, peer_id: int, title: str):
 async def _upload_photo(data: bytes, peer_id: int, title: str = "art.png"):
     """Загружает фото в сообщение (ручная реализация с group_id).
 
-    Аналог _upload_document: vkbottle `PhotoMessageUploader` не передаёт group_id,
-    из-за чего VK отвечает «photo is undefined». Возвращает (attachment, None) или (None, err).
+    Пробуем PNG с ЯВНЫМ content-type `image/png` (aiohttp иначе шлёт octet-stream,
+    а VK-фотосервер такой тип не принимает и возвращает пустой `photo`). Если PNG
+    всё равно не принят — конвертируем в JPEG и пробуем ещё раз.
+
+    Возвращает (attachment, None) или (None, err).
     """
     import json
 
     group_id = await _get_group_id()
 
+    # Кандидаты: (bytes, filename, content_type)
+    candidates = [(data, title, "image/png")]
     try:
-        up_params = {"peer_id": peer_id}
-        if group_id is not None:
-            up_params["group_id"] = group_id
-        resp = await bot.api.request("photos.getMessagesUploadServer", up_params)
-        upload_url = resp["response"]["upload_url"]
+        from PIL import Image as _Image
+        from io import BytesIO as _BIO
+
+        im = _Image.open(_BIO(data)).convert("RGB")
+        jbuf = _BIO()
+        im.save(jbuf, format="JPEG", quality=92)
+        candidates.append((jbuf.getvalue(), "art.jpg", "image/jpeg"))
     except Exception as e:
-        err = _vk_error_text(e)
-        config_manager.log_message(
-            "ERROR", f"photos.getMessagesUploadServer (peer={peer_id}, group={group_id}): {err}"
-        )
-        return None, f"Не удалось получить upload_url (фото): {err}"
+        config_manager.log_message("WARNING", f"_upload_photo: JPEG-конвертация не удалась: {e}")
 
-    try:
-        import aiohttp
-        from io import BytesIO
+    last_err = None
+    for blob, fname, ctype in candidates:
+        # 1) upload-сервер
+        try:
+            up_params = {"peer_id": peer_id}
+            if group_id is not None:
+                up_params["group_id"] = group_id
+            resp = await bot.api.request("photos.getMessagesUploadServer", up_params)
+            upload_url = resp["response"]["upload_url"]
+        except Exception as e:
+            last_err = f"getMessagesUploadServer: {_vk_error_text(e)}"
+            config_manager.log_message(
+                "ERROR", f"photos.getMessagesUploadServer (peer={peer_id}, group={group_id}): {last_err}"
+            )
+            continue
 
-        form = aiohttp.FormData()
-        form.add_field("photo", BytesIO(data), filename=title)
-        timeout = aiohttp.ClientTimeout(total=120)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(upload_url, data=form) as up_resp:
-                raw_body = await up_resp.text()
-    except Exception as e:
-        config_manager.log_message("ERROR", f"POST фото на upload_url: {e}")
-        return None, f"загрузка фото на upload-сервер: {e}"
+        # 2) POST с явным content-type (важно для фото!)
+        try:
+            import aiohttp
+            from io import BytesIO
 
-    try:
-        up = json.loads(raw_body)
-    except Exception as e:
-        config_manager.log_message("ERROR", f"upload фото: не-JSON: {e}: {raw_body[:300]}")
-        return None, f"upload-сервер вернул не-JSON: {raw_body[:300]}"
+            form = aiohttp.FormData()
+            form.add_field("photo", BytesIO(blob), filename=fname, content_type=ctype)
+            timeout = aiohttp.ClientTimeout(total=120)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(upload_url, data=form) as up_resp:
+                    status = up_resp.status
+                    raw_body = await up_resp.text()
+            config_manager.log_message("INFO", f"фото {fname} ({ctype}) HTTP {status}: {raw_body[:300]}")
+        except Exception as e:
+            last_err = f"POST фото: {e}"
+            config_manager.log_message("ERROR", last_err)
+            continue
 
-    if not isinstance(up, dict) or not up.get("photo"):
-        config_manager.log_message("ERROR", f"upload фото: нет `photo`; ответ: {raw_body[:400]}")
-        return None, f"upload-сервер не вернул `photo` (ответ: {raw_body[:300]})"
+        # 3) разбор ответа
+        try:
+            up = json.loads(raw_body)
+        except Exception:
+            last_err = f"upload-сервер вернул не-JSON: {raw_body[:300]}"
+            continue
+        if not isinstance(up, dict) or not up.get("photo"):
+            last_err = f"upload-сервер не вернул `photo` (ответ: {raw_body[:300]})"
+            config_manager.log_message("WARNING", f"фото {fname}: {last_err}")
+            continue
 
-    try:
-        saved = await bot.api.request(
-            "photos.saveMessagesPhoto",
-            {"server": up.get("server"), "photo": up.get("photo"), "hash": up.get("hash")},
-        )
-        item = saved["response"][0]
-        owner = item["owner_id"]
-        pid = item["id"]
-        key = item.get("access_key")
-        att = f"photo{owner}_{pid}_{key}" if key else f"photo{owner}_{pid}"
-        config_manager.log_message("INFO", f"photos.saveMessagesPhoto OK: {att}")
-        return att, None
-    except Exception as e:
-        err = _vk_error_text(e)
-        config_manager.log_message("ERROR", f"photos.saveMessagesPhoto: {err}")
-        return None, err
+        # 4) сохранение
+        try:
+            saved = await bot.api.request(
+                "photos.saveMessagesPhoto",
+                {"server": up.get("server"), "photo": up.get("photo"), "hash": up.get("hash")},
+            )
+            item = saved["response"][0]
+            owner = item["owner_id"]
+            pid = item["id"]
+            key = item.get("access_key")
+            att = f"photo{owner}_{pid}_{key}" if key else f"photo{owner}_{pid}"
+            config_manager.log_message("INFO", f"photos.saveMessagesPhoto OK: {att} ({fname})")
+            return att, None
+        except Exception as e:
+            last_err = _vk_error_text(e)
+            config_manager.log_message("ERROR", f"photos.saveMessagesPhoto ({fname}): {last_err}")
+            continue
+
+    return None, last_err or "не удалось загрузить фото"
 
 
 def _encode_b64_parts(src_path: str, user_id: int, display_name: str | None = None):
