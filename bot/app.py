@@ -975,19 +975,33 @@ def _join_hint(names, out_name: str, is_base64: bool = False) -> str:
     )
 
 
-# Флаг: не запускаем два self-update одновременно (два git pull конкурируют за index.lock).
+# Flag: don't run two self-updates at once (parallel git pulls fight over index.lock).
+# Храним и время старта: если прошлый update «залип», флаг сам протухает через 180 c.
 _self_update_running = False
+_self_update_started = 0.0
+SELF_UPDATE_STALE = 180.0
+SELF_UPDATE_TIMEOUT = 180.0
 
 
 async def _self_update(user_id: int, message: Message):
-    """Обёртка self-update с защитой от параллельного запуска."""
-    global _self_update_running
-    if _self_update_running:
+    """Обёртка self-update: защита от параллельного запуска и от вечного зависания."""
+    global _self_update_running, _self_update_started
+    now = time.time()
+    if _self_update_running and (now - _self_update_started) < SELF_UPDATE_STALE:
         await message.answer("⏳ Обновление уже выполняется, подожди…")
         return
     _self_update_running = True
+    _self_update_started = now
     try:
-        await _do_self_update(user_id, message)
+        await asyncio.wait_for(_do_self_update(user_id, message), timeout=SELF_UPDATE_TIMEOUT)
+    except asyncio.TimeoutError:
+        config_manager.log_message("ERROR", f"self-update: общий таймаут {int(SELF_UPDATE_TIMEOUT)} c — прервано")
+        await message.answer(
+            f"❌ Обновление зависло (> {int(SELF_UPDATE_TIMEOUT)} c) и было прервано. Проверь логи/сервер."
+        )
+    except Exception as e:
+        config_manager.log_message("ERROR", f"self-update: исключение: {e}")
+        await message.answer(f"❌ Обновление прервано ошибкой: {e}")
     finally:
         _self_update_running = False
 
