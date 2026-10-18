@@ -761,6 +761,25 @@ async def _create_7z_archive(src_path: str, user_id: int):
     return archive_path, None
 
 
+def _wrap_zip(inner_7z_path: str, user_id: int, inner_name: str) -> str:
+    """Оборачивает запароленный 7z во внешний обычный .zip.
+
+    VK отклоняет защищённые/нечитаемые архивы (empty_archive), поэтому внешний
+    ZIP делаем НЕзапароленным и непустым (внутри один .7z) — VK его принимает.
+    Пароль по-прежнему защищает внутренний 7z (SEND_7Z_PASSWORD).
+
+    Возвращает путь к внешнему .zip (в tmp/).
+    """
+    import zipfile
+
+    timestamp = int(time.time())
+    zip_path = os.path.join(config_manager.TMP_DIR, f"send_{user_id}_{timestamp}.zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Внутренний 7z кладём внутрь zip под своим именем (не пустой архив).
+        zf.write(inner_7z_path, arcname=inner_name)
+    return zip_path
+
+
 async def _download_url_to_tmp(url: str, user_id: int):
     """Скачивает файл по URL во временный файл. Возвращает (path, filename) или (None, ошибка)."""
     try:
@@ -804,8 +823,9 @@ async def _download_url_to_tmp(url: str, user_id: int):
 async def _send_file_command(user_id: int, text: str, message: Message):
     """`send <путь|url>` — прислать файл или папку (с сервера или по ссылке) в этот чат.
 
-    Файл перед отправкой упаковывается в 7z-архив с паролем (SEND_7Z_PASSWORD),
-    чтобы в ВК не уходил исходный формат/содержимое. В чат приходит архив, а не файл.
+    Файл упаковывается в 7z-архив с паролем (SEND_7Z_PASSWORD), затем оборачивается
+    во внешний обычный .zip (VK отклоняет защищённый 7z как empty_archive, а внешний
+    zip принимает). В чат приходит .zip, внутри — запароленный .7z.
     """
     parts = text.split(None, 1)
     if len(parts) < 2 or not parts[1].strip():
@@ -826,51 +846,58 @@ async def _send_file_command(user_id: int, text: str, message: Message):
             await message.answer(f"Файл не найден: {path}")
             return
 
-    # ── Упаковка в 7z-архив с паролем ──
+    # ── Упаковка: 7z (запаролен) → внешний .zip (принимает VK) ──
     await message.answer(f"🗜️ Упаковываю в 7z с паролем «{SEND_7Z_PASSWORD}»…")
     archive_path, err = await _create_7z_archive(path, user_id)
     if archive_path is None:
         await message.answer(f"Не удалось создать 7z-архив: {err}")
         return
+
+    inner_name = os.path.basename(archive_path)
     try:
-        size = os.path.getsize(archive_path)
+        zip_path = _wrap_zip(archive_path, user_id, inner_name)
+    except Exception as e:
+        config_manager.log_message("ERROR", f"send: обёртка в zip не удалась: {e}")
+        await message.answer(f"Не удалось упаковать в zip: {e}")
+        return
+    try:
+        size = os.path.getsize(zip_path)
     except Exception:
         size = 0
     if size > SEND_MAX_BYTES:
         await message.answer(f"Архив слишком большой ({_fmt_bytes(size)}); лимит {_fmt_bytes(SEND_MAX_BYTES)}.")
         return
-    title = os.path.basename(archive_path)
+    title = os.path.basename(zip_path)
 
     if doc_uploader is None:
         await message.answer("Загрузчик документов недоступен.")
         return
     try:
-        with open(archive_path, "rb") as f:
+        with open(zip_path, "rb") as f:
             data = f.read()
     except Exception as e:
-        config_manager.log_message("ERROR", f"send: чтение архива {archive_path} не удалось: {e}")
+        config_manager.log_message("ERROR", f"send: чтение архива {zip_path} не удалось: {e}")
         await message.answer(f"Не удалось прочитать архив: {e}")
         return
     await _show_typing(user_id)
-    # ИСПРАВЛЕНО (v5.14.1): загрузка идёт через _upload_document() — передаётся group_id
-    # сообщества (без него upload-сервер не возвращает file → «file is undefined») и
-    # логируется реальная причина сбоя.
+    # ИСПРАВЛЕНО (v5.14.2...): загрузка идёт через _upload_document() — логируется
+    # реальный ответ upload-сервера (это выявило empty_archive для защищённого 7z).
     attachment, up_err = await _upload_document(data, user_id, title)
     if attachment is None:
         await message.answer(
-            f"❌ VK не принял архив «{title}»:\n{up_err}\n\nПароль: {SEND_7Z_PASSWORD}\nАрхив лежит на сервере: {archive_path}"
+            f"❌ VK не принял архив «{title}»:\n{up_err}\n\nАрхив лежит на сервере: {zip_path}"
         )
         return
     try:
         await bot.api.messages.send(
             peer_id=user_id,
-            message=f"🔒 {title} ({_fmt_bytes(size)}) — пароль: {SEND_7Z_PASSWORD}",
+            message=f"🔒 {title} ({_fmt_bytes(size)}) — внутри «{inner_name}», пароль: {SEND_7Z_PASSWORD}",
             attachment=attachment, random_id=0,
         )
-        config_manager.log_message("INFO", f"Админ [{user_id}] send: {path} -> {archive_path} ({_fmt_bytes(size)})")
+        config_manager.log_message("INFO", f"Админ [{user_id}] send: {path} -> {zip_path} ({_fmt_bytes(size)})")
     except Exception as e:
         err = _vk_error_text(e)
-        config_manager.log_message("ERROR", f"send «{title}»: VK не отправил архив — {err} (архив: {archive_path})")
+        config_manager.log_message("ERROR", f"send «{title}»: VK не отправил архив — {err} (архив: {zip_path})")
         await message.answer(f"❌ Не удалось отправить архив «{title}»:\n{err}")
 
 
