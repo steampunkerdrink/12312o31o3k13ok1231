@@ -611,6 +611,50 @@ async def _resend_last_art(user_id: int, message: Message):
 # Предохранитель: не тащим в память/в VK слишком большие файлы
 SEND_MAX_BYTES = 100 * 1024 * 1024
 
+# Команда send: файл (или папка) перед отправкой упаковывается в 7z-архив с паролем,
+# чтобы в ВК не уходил исходный формат/содержимое (напр. .exe).
+SEND_7Z_PASSWORD = "123456"
+
+
+def _find_7z() -> str | None:
+    """Возвращает путь к 7-Zip (`7z`/`7za`/`7zr`) или None, если 7-Zip не установлен."""
+    for name in ("7z", "7za", "7zr"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+async def _create_7z_archive(src_path: str, user_id: int):
+    """Упаковывает src_path (файл или папку) в 7z-архив с паролем SEND_7Z_PASSWORD.
+
+    Архив (`-mhe=on` — шифруются и имена файлов, не видно содержимое) создаётся
+    в tmp/. Возвращает (archive_path, None) при успехе, иначе (None, сообщение об ошибке).
+    """
+    exe = _find_7z()
+    if exe is None:
+        return None, "7-Zip не установлен на сервере (нужен пакет p7zip-full или 7zip с командой 7z/7za/7zr)"
+
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(src_path.rstrip("/\\"))) or "file"
+    archive_path = os.path.join(config_manager.TMP_DIR, f"send7z_{user_id}_{int(time.time())}_{base}.7z")
+    cmd = [exe, "a", "-y", "-t7z", f"-p{SEND_7Z_PASSWORD}", "-mhe=on", archive_path, src_path]
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+    except Exception as e:
+        return None, f"сбой 7z: {e}"
+    if proc.returncode not in (0, 1):  # 0 — успех, 1 — успех с предупреждениями
+        tail = (stderr or b"").decode("utf-8", "replace").strip() or (stdout or b"").decode("utf-8", "replace").strip()
+        try:
+            os.remove(archive_path)
+        except Exception:
+            pass
+        return None, f"7z вернул код {proc.returncode}: {tail or 'см. консоль'}"
+    return archive_path, None
+
 
 async def _download_url_to_tmp(url: str, user_id: int):
     """Скачивает файл по URL во временный файл. Возвращает (path, filename) или (None, ошибка)."""
@@ -653,7 +697,11 @@ async def _download_url_to_tmp(url: str, user_id: int):
 
 
 async def _send_file_command(user_id: int, text: str, message: Message):
-    """`send <путь|url>` — прислать файл (с сервера или по ссылке) в этот чат документом."""
+    """`send <путь|url>` — прислать файл или папку (с сервера или по ссылке) в этот чат.
+
+    Файл перед отправкой упаковывается в 7z-архив с паролем (SEND_7Z_PASSWORD),
+    чтобы в ВК не уходил исходный формат/содержимое. В чат приходит архив, а не файл.
+    """
     parts = text.split(None, 1)
     if len(parts) < 2 or not parts[1].strip():
         await message.answer("Укажи файл или ссылку: send <путь|url>  (напр.: send 1.txt  или  send https://host/f.zip)")
@@ -666,36 +714,37 @@ async def _send_file_command(user_id: int, text: str, message: Message):
         if path is None:
             await message.answer(f"Не удалось скачать файл: {info}")
             return
-        title = info
     else:
         base = shell_worker.last_valid_path or "/"
         path = os.path.expanduser(raw_arg if os.path.isabs(raw_arg) else os.path.join(base, raw_arg))
         if not os.path.exists(path):
             await message.answer(f"Файл не найден: {path}")
             return
-        if os.path.isdir(path):
-            await message.answer(
-                f"Это папка: {path}\nСначала упакуй, напр.: tar czf out.tgz {raw_arg}  → send out.tgz"
-            )
-            return
-        title = os.path.basename(path) or "file"
+
+    # ── Упаковка в 7z-архив с паролем ──
+    await message.answer(f"🗜️ Упаковываю в 7z с паролем «{SEND_7Z_PASSWORD}»…")
+    archive_path, err = await _create_7z_archive(path, user_id)
+    if archive_path is None:
+        await message.answer(f"Не удалось создать 7z-архив: {err}")
+        return
+    try:
+        size = os.path.getsize(archive_path)
+    except Exception:
+        size = 0
+    if size > SEND_MAX_BYTES:
+        await message.answer(f"Архив слишком большой ({_fmt_bytes(size)}); лимит {_fmt_bytes(SEND_MAX_BYTES)}.")
+        return
+    title = os.path.basename(archive_path)
 
     if doc_uploader is None:
         await message.answer("Загрузчик документов недоступен.")
         return
     try:
-        size = os.path.getsize(path)
-    except Exception:
-        size = 0
-    if size > SEND_MAX_BYTES:
-        await message.answer(f"Файл слишком большой ({_fmt_bytes(size)}); лимит {_fmt_bytes(SEND_MAX_BYTES)}.")
-        return
-    try:
-        with open(path, "rb") as f:
+        with open(archive_path, "rb") as f:
             data = f.read()
     except Exception as e:
-        config_manager.log_message("ERROR", f"send: чтение {path} не удалось: {e}")
-        await message.answer(f"Не удалось прочитать файл: {e}")
+        config_manager.log_message("ERROR", f"send: чтение архива {archive_path} не удалось: {e}")
+        await message.answer(f"Не удалось прочитать архив: {e}")
         return
     await _show_typing(user_id)
     try:
@@ -703,14 +752,16 @@ async def _send_file_command(user_id: int, text: str, message: Message):
             doc_uploader.upload(file_source=data, peer_id=user_id, title=title), timeout=180
         )
         await bot.api.messages.send(
-            peer_id=user_id, message=f"📎 {title} — {_fmt_bytes(size)}", attachment=attachment, random_id=0
+            peer_id=user_id,
+            message=f"🔒 {title} ({_fmt_bytes(size)}) — пароль: {SEND_7Z_PASSWORD}",
+            attachment=attachment, random_id=0,
         )
-        config_manager.log_message("INFO", f"Админ [{user_id}] send: {path} ({_fmt_bytes(size)})")
+        config_manager.log_message("INFO", f"Админ [{user_id}] send: {path} -> {archive_path} ({_fmt_bytes(size)})")
     except Exception as e:
         err = _vk_error_text(e)
-        config_manager.log_message("ERROR", f"send «{title}»: VK не принял файл — {err} (путь: {path})")
+        config_manager.log_message("ERROR", f"send «{title}»: VK не принял файл — {err} (архив: {archive_path})")
         await message.answer(
-            f"❌ VK не принял файл «{title}»:\n{err}\n\nФайл лежит на сервере: {path}"
+            f"❌ VK не принял архив «{title}»:\n{err}\n\nПароль: {SEND_7Z_PASSWORD}\nАрхив лежит на сервере: {archive_path}"
         )
 
 
@@ -804,7 +855,7 @@ HELP_TEXT = (
     "• art:last — повторно прислать последнюю картинку\n"
     "• art:doc <команда> — прислать результат документом (по умолчанию — фото)\n"
     "• bg: <команда> — фоновый запуск (вывод приходит по мере работы)\n"
-    "• send <файл|url> — прислать файл с сервера или по ссылке в этот чат\n"
+    "• send <файл|url> — прислать файл/папку с сервера или по ссылке (7z с паролем)\n"
     "• reset / сброс / exit — очистить сессию\n"
     "• 💀 Hard Reset — убить зависшую сессию\n"
     "• ctrl / ctrl+c — отправить SIGINT (прервать вывод)\n"
