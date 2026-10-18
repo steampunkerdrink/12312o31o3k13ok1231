@@ -43,7 +43,7 @@ except Exception:
     pass
 
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.15.2"
+VERSION = "5.15.3"
 
 dynamic_commands_map = {}
 

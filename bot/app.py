@@ -1011,6 +1011,7 @@ async def _send_file_command(user_id: int, text: str, message: Message):
         err = _vk_error_text(e)
         config_manager.log_message("ERROR", f"send «{out_name}»: VK не отправил файл — {err}")
         await message.answer(f"❌ Не удалось отправить файл «{out_name}»:\n{err}")
+async def _send_b64_command(user_id: int, text: str, message: Message):
     """`send_base64 <путь|url>` — прислать файл с обфускацией (base64 в .txt)."""
     parts = text.split(None, 1)
     if len(parts) < 2 or not parts[1].strip():
