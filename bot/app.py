@@ -1427,6 +1427,7 @@ async def handle_message(message: Message):
             return
         try:
             session = await get_or_create_session(user_id, bot.api)
+            await _show_typing(user_id)
             session["writer"].write((f"( {bg_cmd} ) &\n").encode("utf-8"))
             await session["writer"].drain()
             config_manager.log_message("INFO", f"Админ [{user_id}] bg-запуск: {bg_cmd}")

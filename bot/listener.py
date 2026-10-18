@@ -63,6 +63,40 @@ async def _send_typing(api, peer_id: int):
     except Exception as e:
         log_message("WARNING", f"typing (setActivity) для {peer_id}: {e}")
 
+
+# «Пульс» typing: пока по сессии идёт вывод, каждые ~4 c обновляем статус «печатает…»;
+# через TYPING_IDLE секунд тишины пульс сам завершается.
+TYPING_PULSE = 4.0       # период обновления статуса
+TYPING_IDLE = 6.0        # сколько секунд тишины держать статус после последнего вывода
+_typing_tasks = {}
+_last_output_ts = {}
+
+
+async def _typing_pulse(api, peer_id: int):
+    """Держит статус «печатает…», пока по сессии поступает вывод."""
+    try:
+        while (time.time() - _last_output_ts.get(peer_id, 0.0)) < TYPING_IDLE:
+            await _send_typing(api, peer_id)
+            await asyncio.sleep(TYPING_PULSE)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log_message("WARNING", f"typing-pulse {peer_id}: {e}")
+    finally:
+        _typing_tasks.pop(peer_id, None)
+
+
+def bump_typing(api, peer_id: int):
+    """Отмечает поступление вывода и при необходимости запускает typing-пульс."""
+    _last_output_ts[peer_id] = time.time()
+    task = _typing_tasks.get(peer_id)
+    if task is None or task.done():
+        try:
+            _typing_tasks[peer_id] = asyncio.create_task(_typing_pulse(api, peer_id))
+        except RuntimeError:
+            # нет запущенного event loop (не должно случаться) — молча пропускаем
+            pass
+
 # ИСПРАВЛЕНО (v5.2.1): Кэш путей теперь монолитно живёт здесь, решая проблему Circular Import!
 last_valid_path = "/root"
 
@@ -170,6 +204,9 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                 if not chunk_bytes: break
                     
                 decoded_chunk = chunk_bytes.decode("utf-8", errors="replace")
+
+                # Пришёл вывод — держим статус «печатает…», пока он продолжается.
+                bump_typing(api, user_id)
 
                 # Health-check: сессия ответила на зонд __SESS_READY__ → подтверждаем живость
                 if b"__SESS_READY__" in chunk_bytes:
