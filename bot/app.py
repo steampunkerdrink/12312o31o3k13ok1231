@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import signal
+import sys
 import time
 try:
     import pty
@@ -911,6 +912,60 @@ def _join_hint(names, out_name: str, is_base64: bool = False) -> str:
     )
 
 
+async def _self_update(user_id: int, message: Message):
+    """Self-update: git pull в папке бота (ff-only) + перезапуск процесса.
+
+    Перед рестартом проверяем, что новый код компилируется (py_compile); иначе
+    откатываем pull и НЕ перезапускаемся. Перезапуск — через os.execv (PID сохраняется,
+    что прозрачно и для systemd).
+    """
+    base = config_manager.BASE_DIR
+    await message.answer("🔄 Выполняю `git pull`…")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", base, "pull", "--ff-only",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except Exception as e:
+        config_manager.log_message("ERROR", f"self-update: git pull сбой: {e}")
+        await message.answer(f"❌ git pull не выполнился: {e}")
+        return
+    text = (out or b"").decode("utf-8", "replace").strip() or (err or b"").decode("utf-8", "replace").strip()
+    if proc.returncode != 0:
+        config_manager.log_message("ERROR", f"self-update: git pull code {proc.returncode}: {text}")
+        await message.answer(f"❌ git pull упал (code {proc.returncode}):\n{text[:500]}")
+        return
+
+    # Проверяем, что новый код хотя бы компилируется; иначе откатываем pull.
+    pc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "py_compile",
+        os.path.join(base, "bot", "app.py"),
+        os.path.join(base, "bot", "config.py"),
+        os.path.join(base, "bot", "listener.py"),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    pc_out, pc_err = await pc.communicate()
+    if pc.returncode != 0:
+        pcerr = (pc_err or pc_out or b"").decode("utf-8", "replace").strip()
+        config_manager.log_message("ERROR", f"self-update: новый код не прошёл py_compile — откат: {pcerr}")
+        await message.answer(f"❌ Новый код не прошёл py_compile, откатываю pull и не перезапускаюсь.\n{pcerr[:400]}")
+        try:
+            await asyncio.create_subprocess_exec(
+                "git", "-C", base, "reset", "--hard", "HEAD@{1}",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+        return
+
+    await message.answer(f"✅ git pull: {text or 'ок'}\n🔁 Перезапускаюсь…")
+    await asyncio.sleep(1.5)
+    config_manager.log_message("INFO", f"Админ [{user_id}] SELF-UPDATE: перезапуск ({sys.executable} run.py)")
+    # exec заменяет текущий процесс, сохраняя PID — прозрачно для systemd.
+    os.execv(sys.executable, [sys.executable, os.path.join(base, "run.py")])
+
+
 def _split_file(src: str, user_id: int, out_name: str, max_bytes: int):
     """Бинарно делит файл на части <= max_bytes, если он больше лимита.
 
@@ -1238,6 +1293,7 @@ HELP_TEXT = (
     "• bg: <команда> — фоновый запуск (вывод приходит по мере работы)\n"
     "• send <файл|url> — прислать файл/папку с сервера или по ссылке (обычным документом, без обфускации)\n"
     "• send_base64 <файл|url> — то же, но обфускация (base64 в .txt)\n"
+    "• update / обновить — обновить бота (git pull) и перезапустить\n"
     "• reset / сброс / exit — очистить сессию\n"
     "• 💀 Hard Reset — убить зависшую сессию\n"
     "• ctrl / ctrl+c — отправить SIGINT (прервать вывод)\n"
@@ -1425,6 +1481,11 @@ async def handle_message(message: Message):
                 config_manager.log_message("ERROR", f"Сбой отправки байта прерывания: {e_signal}")
                 
             shell_worker.user_interactive_mode[f"{user_id}_last_cmd"] = "SIGINT (Ctrl+C)"
+        return
+
+    # SELF-UPDATE: git pull + перезапуск процесса (только для админов — весь handler под ALLOWED_ADMINS)
+    if lower_text in ("self-update", "update", "обновить", "апдейт"):
+        await _self_update(user_id, message)
         return
 
     if text_input in config_manager.dynamic_commands_map:
