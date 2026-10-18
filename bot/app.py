@@ -109,8 +109,8 @@ async def _show_typing(user_id: int):
         if group_id is not None:
             params["group_id"] = group_id
         await bot.api.request("messages.setActivity", params)
-    except Exception:
-        pass
+    except Exception as e:
+        config_manager.log_message("WARNING", f"typing (setActivity) для {user_id}: {e}")
 
 
 async def _notify_startup():
@@ -131,16 +131,16 @@ def _close_session(user_id: int):
     if session:
         try:
             session["task"].cancel()
-        except Exception:
-            pass
+        except Exception as e:
+            config_manager.log_message("WARNING", f"_close_session[{user_id}]: cancel task: {e}")
         try:
             os.close(session["master_fd"])
-        except Exception:
-            pass
+        except Exception as e:
+            config_manager.log_message("WARNING", f"_close_session[{user_id}]: close fd: {e}")
         try:
             os.killpg(os.getpgid(session["process"].pid), signal.SIGKILL)
-        except Exception:
-            pass
+        except Exception as e:
+            config_manager.log_message("WARNING", f"_close_session[{user_id}]: killpg: {e}")
     shell_worker.user_interactive_mode[user_id] = False
 
 
@@ -158,16 +158,16 @@ async def _teardown_session(user_id: int):
     try:
         session["task"].cancel()
         await asyncio.wait_for(session["task"], timeout=2)
-    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-        pass
+    except (asyncio.CancelledError, asyncio.TimeoutError, Exception) as e:
+        config_manager.log_message("WARNING", f"_teardown_session[{user_id}]: wait listener: {e}")
     try:
         os.killpg(os.getpgid(session["process"].pid), signal.SIGKILL)
-    except Exception:
-        pass
+    except Exception as e:
+        config_manager.log_message("WARNING", f"_teardown_session[{user_id}]: killpg: {e}")
     try:
         os.close(session["master_fd"])
-    except Exception:
-        pass
+    except Exception as e:
+        config_manager.log_message("WARNING", f"_teardown_session[{user_id}]: close fd: {e}")
 
 
 async def _idle_watchdog():
@@ -188,8 +188,8 @@ async def _idle_watchdog():
                                 message=f"💤 Сессия закрыта из-за простоя (> {timeout} c).",
                                 random_id=0,
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            config_manager.log_message("WARNING", f"idle-watchdog: уведомление {uid}: {e}")
         except Exception as e:
             config_manager.log_message("ERROR", f"Ошибка idle-watchdog: {e}")
         await asyncio.sleep(30)
@@ -292,8 +292,8 @@ def _read_mem():
                     break
         if total and avail:
             return total - avail, total
-    except Exception:
-        pass
+    except Exception as e:
+        config_manager.log_message("WARNING", f"_read_meminfo: {e}")
     return None
 
 
@@ -393,8 +393,8 @@ def _pty_preexec():
     if fcntl is not None:
         try:
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-        except Exception:
-            pass
+        except Exception as e:
+            config_manager.log_message("WARNING", f"_pty_preexec: TIOCSCTTY не удался (интерактив может сломаться): {e}")
 
 
 async def _create_session(user_id: int, api):
@@ -406,8 +406,8 @@ async def _create_session(user_id: int, api):
     if struct is not None:
         try:
             fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 160, 0, 0))
-        except Exception:
-            pass
+        except Exception as e:
+            config_manager.log_message("WARNING", f"_create_session[{user_id}]: TIOCSWINSZ (размер окна): {e}")
     process = await asyncio.create_subprocess_exec(
         "/bin/bash", stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
         preexec_fn=_pty_preexec,
@@ -833,8 +833,8 @@ def _encode_b64_parts(src_path: str, user_id: int, display_name: str | None = No
         if f is not None:
             try:
                 f.close()
-            except Exception:
-                pass
+            except Exception as e:
+                config_manager.log_message("WARNING", f"_encode_b64_parts: close: {e}")
 
     if with_error is not None:
         return [], None, with_error
@@ -873,8 +873,8 @@ async def _download_url_to_tmp(url: str, user_id: int):
                         if total > SEND_MAX_BYTES:
                             try:
                                 os.remove(path)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                config_manager.log_message("WARNING", f"_download_url_to_tmp: remove oversized {path}: {e}")
                             return None, f"файл больше {_fmt_bytes(SEND_MAX_BYTES)}"
                         f.write(chunk)
                 return path, filename
@@ -964,8 +964,8 @@ async def _self_update(user_id: int, message: Message):
                 "git", "-C", base, "reset", "--hard", "HEAD@{1}",
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            config_manager.log_message("WARNING", f"self-update: откат pull не удался: {e}")
         return
 
     await message.answer(f"✅ git pull: {text or 'ок'}\n🔁 Перезапускаюсь…")
@@ -1091,13 +1091,13 @@ async def _send_file_command(user_id: int, text: str, message: Message):
             if downloaded or p_path != path:
                 try:
                     os.remove(p_path)
-                except Exception:
-                    pass
+                except Exception as e:
+                    config_manager.log_message("WARNING", f"send: remove part {p_path}: {e}")
         if downloaded:
             try:
                 os.remove(path)
-            except Exception:
-                pass
+            except Exception as e:
+                config_manager.log_message("WARNING", f"send: remove downloaded {path}: {e}")
     except Exception as e:
         err = _vk_error_text(e)
         config_manager.log_message("ERROR", f"send «{out_name}»: VK не отправил файл — {err}")
@@ -1194,13 +1194,13 @@ async def _send_b64_command(user_id: int, text: str, message: Message):
         for p_path, _p_name, _p_size in parts:
             try:
                 os.remove(p_path)
-            except Exception:
-                pass
+            except Exception as e:
+                config_manager.log_message("WARNING", f"send_base64: remove part {p_path}: {e}")
         if downloaded:
             try:
                 os.remove(path)
-            except Exception:
-                pass
+            except Exception as e:
+                config_manager.log_message("WARNING", f"send_base64: remove downloaded {path}: {e}")
         config_manager.log_message(
             "INFO", f"send: убрано временных файлов: {len(parts) + (1 if downloaded else 0)}"
         )
@@ -1262,8 +1262,8 @@ async def _capture_timeout(user_id: int, seconds: int = 60):
                 message=f"⏱ ART-захват: маркер не получен за {seconds} c (команда не завершилась?).",
                 random_id=0,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            config_manager.log_message("WARNING", f"ART-захват: не удалось уведомить {user_id}: {e}")
 
 
 async def _art_via_session(user_id: int, command: str):

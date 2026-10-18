@@ -7,6 +7,17 @@
 
 ---
 
+## [5.16.3] — 2026-10-18
+
+### Изменено
+- **Диагностика скрытых ошибок**: молчаливые `except Exception: pass` заменены на
+  логирование `WARNING` с контекстом (создание/снятие PTY-сессии, `killpg`/`close fd`,
+  `TIOCSCTTY`/`TIOCSWINSZ`, typing/`setActivity`, idle-watchdog, чтение meminfo, ART-timeout,
+  удаление временных файлов, откат self-update). В `config.py` (на этапе импорта, где
+  `log_message` ещё не определена) — `print`. Оставлен `pass` только для платформенного
+  `add_signal_handler` (NotImplementedError/RuntimeError/ValueError).
+  Теперь скрытые сбои видны в `logs/info.log` (WARNING) и могут быть исправлены.
+
 ## [5.16.2] — 2026-10-18
 
 ### Исправлено

@@ -7,8 +7,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = os.path.join(BASE_DIR, "config")
 try:
     os.makedirs(CONFIG_DIR, exist_ok=True)
-except Exception:
-    pass
+except Exception as e:
+    print(f"[config] Не удалось создать {CONFIG_DIR}: {e}", flush=True)
 
 
 def _cfg(name: str) -> str:
@@ -30,8 +30,8 @@ ENTRYPOINT_FILE = _cfg("entrypoint.txt")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 try:
     os.makedirs(LOG_DIR, exist_ok=True)
-except Exception:
-    pass
+except Exception as e:
+    print(f"[config] Не удалось создать {LOG_DIR}: {e}", flush=True)
 INFO_LOG_FILE = os.path.join(LOG_DIR, "info.log")
 ERROR_LOG_FILE = os.path.join(LOG_DIR, "error.log")
 
@@ -39,11 +39,11 @@ ERROR_LOG_FILE = os.path.join(LOG_DIR, "error.log")
 TMP_DIR = os.path.join(BASE_DIR, "tmp")
 try:
     os.makedirs(TMP_DIR, exist_ok=True)
-except Exception:
-    pass
+except Exception as e:
+    print(f"[config] Не удалось создать {TMP_DIR}: {e}", flush=True)
 
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.16.2"
+VERSION = "5.16.3"
 
 dynamic_commands_map = {}
 

@@ -60,8 +60,8 @@ async def _send_typing(api, peer_id: int):
         if gid is not None:
             params["group_id"] = gid
         await api.request("messages.setActivity", params)
-    except Exception:
-        pass
+    except Exception as e:
+        log_message("WARNING", f"typing (setActivity) для {peer_id}: {e}")
 
 # ИСПРАВЛЕНО (v5.2.1): Кэш путей теперь монолитно живёт здесь, решая проблему Circular Import!
 last_valid_path = "/root"
