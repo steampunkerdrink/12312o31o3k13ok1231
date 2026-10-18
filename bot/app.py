@@ -610,6 +610,9 @@ async def _resend_last_art(user_id: int, message: Message):
 
 # Предохранитель: не тащим в память/в VK слишком большие файлы
 SEND_MAX_BYTES = 100 * 1024 * 1024
+# Если итоговый base64 .txt больше этой величины — разбиваем на части (лимит VK на
+# документ ~200 МБ, оставляем запас; base64-текст безопасно доклеивается).
+PART_MAX_BYTES = 95 * 1024 * 1024
 
 # Команда send: файл кодируется в base64 и сохраняется как .txt — так VK принимает
 # документ (txt не считается архивом), а содержимое скрыто кодированием (в т.ч. от
@@ -721,17 +724,19 @@ async def _upload_document(data: bytes, peer_id: int, title: str):
         return None, err
 
 
-def _encode_b64(src_path: str, user_id: int, display_name: str | None = None):
-    """Кодирует файл в base64 и сохраняет как .txt в tmp/.
+def _encode_b64_parts(src_path: str, user_id: int, display_name: str | None = None):
+    """Потоково кодирует файл в base64 и пишет .txt-части в tmp/.
 
-    VK блокирует архивы с непроверяемым содержимым (empty_archive/wrong_arch_file),
-    поэтому вместо упаковки используем base64: .txt — обычный документ, VK его примет,
-    а содержимое скрыто кодированием. Декодируется у получателя.
-    В имени убираем ИСХОДНОЕ расширение файла, чтобы получатель не видел тип.
-    Если передан display_name — берём имя из него (для URL-файлов, чей путь содержит
-    служебный префикс `dl_<id>_`), иначе — из basename пути.
+    - Файл читается блоками по 3 МБ (кратно 3 → base64 без потерь), в память целиком
+      не грузится.
+    - Если итоговый текст > PART_MAX_BYTES — разбивается на части `name.txt`,
+      `name.part2.txt`, … Каждая часть — набор полных base64-строк (по 76 символов).
+    - VK блокирует архивы (empty_archive/wrong_arch_file), а .txt принимает.
+    - В имени нет исходного расширения (получатель не видит тип). Для URL-файлов,
+      чей путь содержит служебный префикс dl_<id>_, можно передать display_name.
 
-    Возвращает (txt_path, txt_name, None) при успехе, иначе (None, None, сообщение об ошибке).
+    Возвращает (parts, stem, None) при успехе, иначе ([], None, сообщение об ошибке).
+    parts = [(abs_path, filename, byte_size), ...] в порядке следования.
     """
     import base64
 
@@ -739,20 +744,58 @@ def _encode_b64(src_path: str, user_id: int, display_name: str | None = None):
     base = re.sub(r"[^A-Za-z0-9._-]", "_", src_name) or "file"
     # Убираем последнее расширение исходного файла (".exe" → ""): имя не выдаёт тип.
     stem = os.path.splitext(base)[0] or base
-    txt_name = f"{stem}.txt"
-    txt_path = os.path.join(config_manager.TMP_DIR, f"send_{user_id}_{int(time.time())}_{txt_name}")
+
+    parts: list = []
+    f = None
+    path = name = ""
+    wbytes = 0
+    buf = ""  # неполная строка (до 76 символов)
+    CHUNK = 3 * 1024 * 1024  # кратно 3 байтам → base64 блочно без потерь
+    with_error = None
     try:
-        # base64 увеличивает объём на ~33%; читаем целиком и кодируем в ascii-текст,
-        # разбитый на строки по 76 символов (непрерывная гигантская строка неудобна).
-        with open(src_path, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode("ascii")
-        lines = [encoded[i : i + 76] for i in range(0, len(encoded), 76)]
-        with open(txt_path, "w", encoding="ascii") as out:
-            out.write("\n".join(lines))
-            out.write("\n")
-        return txt_path, txt_name, None
+        with open(src_path, "rb") as src:
+            while True:
+                chunk = src.read(CHUNK)
+                if not chunk:
+                    break
+                buf += base64.b64encode(chunk).decode("ascii")
+                while len(buf) >= 76:
+                    line, buf = buf[:76], buf[76:]
+                    # Новая часть, когда текущая уже набрала предельный объём.
+                    if f is None or (wbytes >= PART_MAX_BYTES and wbytes > 0):
+                        if f is not None:
+                            f.close()
+                        name = f"{stem}.txt" if len(parts) == 0 else f"{stem}.part{len(parts)+1}.txt"
+                        path = os.path.join(config_manager.TMP_DIR, f"send_{user_id}_{int(time.time())}_{name}")
+                        f = open(path, "w", encoding="ascii")
+                        parts.append([path, name, 0])
+                        wbytes = 0
+                    f.write(line + "\n")
+                    wbytes += 77
+                    parts[-1][2] = wbytes
+            # Остаток последней строки (если объём не делится на 76 без остатка).
+            if buf:
+                if f is None:
+                    name = f"{stem}.txt"
+                    path = os.path.join(config_manager.TMP_DIR, f"send_{user_id}_{int(time.time())}_{name}")
+                    f = open(path, "w", encoding="ascii")
+                    parts.append([path, name, 0])
+                    wbytes = 0
+                f.write(buf + "\n")
+                parts[-1][2] += len(buf) + 1
     except Exception as e:
-        return None, None, f"base64-кодирование не удалось: {e}"
+        with_error = f"base64-кодирование не удалось: {e}"
+    finally:
+        if f is not None:
+            try:
+                f.close()
+            except Exception:
+                pass
+
+    if with_error is not None:
+        return [], None, with_error
+    # Возвращаем список (abs_path, name, byte_size).
+    return [(p[0], p[1], p[2]) for p in parts], stem, None
 
 
 async def _download_url_to_tmp(url: str, user_id: int):
@@ -825,55 +868,71 @@ async def _send_file_command(user_id: int, text: str, message: Message):
             await message.answer(f"Файл не найден: {path}")
             return
 
-    # ── Кодирование в base64 (.txt) — VK принимает, содержимое скрыто ──
+    # ── Кодирование в base64 (.txt) — потоково, с разбиением на части ──
     await message.answer("🔒 Кодирую в base64 (.txt)…")
-    txt_path, txt_name, b64_err = _encode_b64(path, user_id, display_name)
-    if txt_path is None:
+    parts, stem, b64_err = _encode_b64_parts(path, user_id, display_name)
+    if not parts:
         await message.answer(f"Не удалось закодировать файл: {b64_err}")
         return
-    try:
-        size = os.path.getsize(txt_path)
-    except Exception:
-        size = 0
-    if size > SEND_MAX_BYTES:
-        await message.answer(f"Файл в base64 слишком большой ({_fmt_bytes(size)}); лимит {_fmt_bytes(SEND_MAX_BYTES)}.")
-        return
-    title = txt_name
 
     if doc_uploader is None:
         await message.answer("Загрузчик документов недоступен.")
         return
-    try:
-        with open(txt_path, "rb") as f:
-            data = f.read()
-    except Exception as e:
-        config_manager.log_message("ERROR", f"send: чтение файла {txt_path} не удалось: {e}")
-        await message.answer(f"Не удалось прочитать файл: {e}")
-        return
-    await _show_typing(user_id)
-    attachment, up_err = await _upload_document(data, user_id, title)
-    if attachment is None:
-        await message.answer(
-            f"❌ VK не принял файл «{title}»:\n{up_err}\n\nФайл лежит на сервере: {txt_path}"
+
+    # Загружаем каждую .txt-часть как отдельный документ.
+    attachments = []
+    for p_path, p_name, _p_size in parts:
+        await _show_typing(user_id)
+        try:
+            with open(p_path, "rb") as f:
+                data = f.read()
+        except Exception as e:
+            config_manager.log_message("ERROR", f"send: чтение файла {p_path} не удалось: {e}")
+            await message.answer(f"Не удалось прочитать файл {p_name}: {e}")
+            return
+        attachment, up_err = await _upload_document(data, user_id, p_name)
+        if attachment is None:
+            await message.answer(
+                f"❌ VK не принял файл «{p_name}»:\n{up_err}\n\nФайл лежит на сервере: {p_path}"
+            )
+            return
+        attachments.append(attachment)
+
+    # Итоговое сообщение: имя + инструкция по склейке/декоду.
+    names = [p[1] for p in parts]
+    total_text = sum(p[2] for p in parts)
+    if len(parts) == 1:
+        head = f"🔑 {names[0]} ({_fmt_bytes(total_text)}) — это base64 (имя без расширения)."
+        tip = (
+            f"Linux:   base64 -d \"{names[0]}\" > \"{stem}\"\n"
+            f"Windows: certutil -decode \"{names[0]}\" out.file\n"
         )
-        return
+    else:
+        head = (
+            f"🔑 Файл разбит на {len(parts)} частей по ~95 МБ "
+            f"(итого {_fmt_bytes(total_text)}): {', '.join(names)}"
+        )
+        order = " ".join(f'"{n}"' for n in names)          # cat a b
+        order_win = "+".join(f'"{n}"' for n in names)      # copy /b a+b
+        tip = (
+            f"Склей части (порядок важен!), затем декодируй:\n"
+            f"Linux:   cat {order} | base64 -d > \"{stem}\"\n"
+            f"Windows: copy /b {order_win} out.b64\n"
+            f"         certutil -decode out.b64 \"{stem}\"\n"
+        )
     try:
         await bot.api.messages.send(
             peer_id=user_id,
-            message=(
-                f"🔑 {title} ({_fmt_bytes(size)}) — это base64 (имя без исходного расширения).\n"
-                f"Скачай и декодируй обратно в файл:\n"
-                f"Linux:   base64 -d \"{title}\" > \"{title[:-4]}\"\n"
-                f"Windows: certutil -decode \"{title}\" out.file\n"
-                f"(все строки файла — это единый base64-поток; сервисы base64decode.org тоже подойдут)"
-            ),
-            attachment=attachment, random_id=0,
+            message=f"{head}\n«Скачай части, затем:\n{tip}",
+            attachment=attachments, random_id=0,
         )
-        config_manager.log_message("INFO", f"Админ [{user_id}] send: {path} -> {txt_path} ({_fmt_bytes(size)})")
+        config_manager.log_message(
+            "INFO", f"Админ [{user_id}] send: {path} -> {len(parts)} txt-части ({_fmt_bytes(total_text)})"
+        )
     except Exception as e:
         err = _vk_error_text(e)
-        config_manager.log_message("ERROR", f"send «{title}»: VK не отправил файл — {err} (файл: {txt_path})")
-        await message.answer(f"❌ Не удалось отправить файл «{title}»:\n{err}")
+        config_manager.log_message("ERROR", f"send «{stem}»: VK не отправил файл — {err}")
+        await message.answer(f"❌ Не удалось отправить файл «{stem}»:\n{err}")
 
 
 # Последняя art-команда пользователя — для подписи на картинке
