@@ -727,13 +727,16 @@ def _encode_b64(src_path: str, user_id: int):
     VK блокирует архивы с непроверяемым содержимым (empty_archive/wrong_arch_file),
     поэтому вместо упаковки используем base64: .txt — обычный документ, VK его примет,
     а содержимое скрыто кодированием. Декодируется у получателя.
+    Наконец, в имени убираем ИСХОДНОЕ расширение файла, чтобы получатель не видел тип.
 
     Возвращает (txt_path, txt_name, None) при успехе, иначе (None, None, сообщение об ошибке).
     """
     import base64
 
     base = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(src_path.rstrip("/\\"))) or "file"
-    txt_name = f"{base}.txt"
+    # Убираем последнее расширение исходного файла (".exe" → ""): имя не выдаёт тип.
+    stem = os.path.splitext(base)[0] or base
+    txt_name = f"{stem}.txt"
     txt_path = os.path.join(config_manager.TMP_DIR, f"send_{user_id}_{int(time.time())}_{txt_name}")
     try:
         # base64 увеличивает объём на ~33%; читаем целиком и кодируем в ascii-текст,
@@ -851,9 +854,9 @@ async def _send_file_command(user_id: int, text: str, message: Message):
         await bot.api.messages.send(
             peer_id=user_id,
             message=(
-                f"🔑 {title} ({_fmt_bytes(size)}) — это base64.\n"
+                f"🔑 {title} ({_fmt_bytes(size)}) — это base64 (имя без исходного расширения).\n"
                 f"Скачай и декодируй обратно в файл:\n"
-                f"Linux:   base64 -d \"{title}\" > \"{txt_path.rpartition('_')[2][:-4]}\"\n"
+                f"Linux:   base64 -d \"{title}\" > \"{title[:-4]}\"\n"
                 f"Windows: certutil -decode \"{title}\" out.file\n"
                 f"(все строки файла — это единый base64-поток; сервисы base64decode.org тоже подойдут)"
             ),
