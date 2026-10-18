@@ -614,6 +614,9 @@ SEND_MAX_BYTES = 5 * 1024 * 1024 * 1024  # 5 ГБ (потоково, в памя
 # Если итоговый base64 .txt больше этой величины — разбиваем на части (лимит VK на
 # документ ~200 МБ, оставляем запас; base64-текст безопасно доклеивается).
 PART_MAX_BYTES = 95 * 1024 * 1024
+# Для обычной (без base64) отправки документ можно крупнее: лимит VK ~200 МБ.
+# Оставляем запас и режем на части по этой величине.
+DOC_PART_MAX_BYTES = 150 * 1024 * 1024
 
 # Команда send: файл кодируется в base64 и сохраняется как .txt — так VK принимает
 # документ (txt не считается архивом), а содержимое скрыто кодированием (в т.ч. от
@@ -867,16 +870,143 @@ def _read_all(path: str) -> bytes:
         return f.read()
 
 
-async def _send_file_command(user_id: int, text: str, message: Message):
-    """`send <путь|url>` — прислать файл или папку (с сервера или по ссылке) в этот чат.
+def _split_file(src: str, user_id: int, out_name: str, max_bytes: int):
+    """Бинарно делит файл на части <= max_bytes, если он больше лимита.
 
-    Файл кодируется в base64 и отправляется как .txt (VK блокирует архивы с
-    непроверяемым содержимым — empty_archive/wrong_arch_file, а .txt принимает).
-    Получатель декодирует base64 обратно в файл.
+    Возвращает список [(path, name, size), ...]. Если файл не превышает max_bytes —
+    один элемент с исходным путём и именем out_name.
     """
+    size = os.path.getsize(src)
+    if size <= max_bytes:
+        return [(src, out_name, size)]
+    ts = int(time.time())
+    idx = 0
+    parts = []
+    with open(src, "rb") as s:
+        while True:
+            chunk = s.read(max_bytes)
+            if not chunk:
+                break
+            idx += 1
+            name = f"{out_name}.part{idx}"
+            pth = os.path.join(config_manager.TMP_DIR, f"send_{user_id}_{ts}_{name}")
+            with open(pth, "wb") as w:
+                w.write(chunk)
+            parts.append((pth, name, len(chunk)))
+    return parts
+
+
+async def _upload_doc_parts(user_id: int, parts, message: Message):
+    """Загружает каждую часть как документ. Возвращает список attachment или None при ошибке."""
+    attachments = []
+    for p_path, p_name, _p_size in parts:
+        await _show_typing(user_id)
+        try:
+            data = await asyncio.to_thread(_read_all, p_path)
+        except Exception as e:
+            config_manager.log_message("ERROR", f"send: чтение файла {p_path} не удалось: {e}")
+            await message.answer(f"Не удалось прочитать файл {p_name}: {e}")
+            return None
+        attachment, up_err = await _upload_document(data, user_id, p_name)
+        if attachment is None:
+            await message.answer(
+                f"❌ VK не принял файл «{p_name}»:\n{up_err}\n\nФайл лежит на сервере: {p_path}"
+            )
+            return None
+        attachments.append(attachment)
+    return attachments
+
+
+async def _send_file_command(user_id: int, text: str, message: Message):
+    """`send <путь|url>` — прислать файл (или папку) как есть, без обфускации.
+
+    Файл уходит обычным документом с исходным именем и расширением. Если он больше
+    DOC_PART_MAX_BYTES — режется на бинарные части (.part1, .part2, …) с подсказкой
+    по склейке. (base64-вариант — команда send_base64.)
+    """
+    parts_text = text.split(None, 1)
+    if len(parts_text) < 2 or not parts_text[1].strip():
+        await message.answer("Укажи файл или ссылку: send <путь|url>  (напр.: send 1.txt  или  send https://host/f.zip)")
+        return
+    raw_arg = parts_text[1].strip().strip('"').strip("'")
+
+    downloaded = False
+    display_name = None
+    if raw_arg.lower().startswith(("http://", "https://")):
+        await message.answer(f"⏬ Скачиваю: {raw_arg}")
+        path, info = await _download_url_to_tmp(raw_arg, user_id)
+        if path is None:
+            await message.answer(f"Не удалось скачать файл: {info}")
+            return
+        display_name = info if isinstance(info, str) else None
+        downloaded = True
+    else:
+        base = shell_worker.last_valid_path or "/"
+        path = os.path.expanduser(raw_arg if os.path.isabs(raw_arg) else os.path.join(base, raw_arg))
+        if not os.path.exists(path):
+            await message.answer(f"Файл не найден: {path}")
+            return
+
+    # Исходное имя (с расширением) — без обфускации.
+    out_name = display_name if display_name else (os.path.basename(path) or "file")
+
+    if doc_uploader is None:
+        await message.answer("Загрузчик документов недоступен.")
+        return
+
+    await message.answer("📤 Загружаю документ…")
+    parts = await asyncio.to_thread(_split_file, path, user_id, out_name, DOC_PART_MAX_BYTES)
+    if not parts:
+        await message.answer("Не удалось подготовить файл.")
+        return
+
+    attachments = await _upload_doc_parts(user_id, parts, message)
+    if attachments is None:
+        return
+
+    names = [p[1] for p in parts]
+    total = sum(p[2] for p in parts)
+    if len(parts) == 1:
+        head = f"📄 {names[0]} ({_fmt_bytes(total)})"
+        tail = ""
+    else:
+        head = (
+            f"📄 Файл разбит на {len(parts)} частей (итого {_fmt_bytes(total)}): {', '.join(names)}"
+        )
+        order = " ".join(f'"{n}"' for n in names)
+        order_win = "+".join(f'"{n}"' for n in names)
+        tail = (
+            "\nСклей части (порядок важен!):\n"
+            f"Linux:   cat {order} > \"{out_name}\"\n"
+            f"Windows: copy /b {order_win} \"{out_name}\""
+        )
+    try:
+        await bot.api.messages.send(
+            peer_id=user_id, message=head + tail, attachment=attachments, random_id=0
+        )
+        config_manager.log_message(
+            "INFO", f"Админ [{user_id}] send: {path} -> {len(parts)} докум. (итого {_fmt_bytes(total)})"
+        )
+        # Очистка временных файлов: резаные части и (если качали) скачанный исходник.
+        for p_path, _p_name, _p_size in parts:
+            if downloaded or p_path != path:
+                try:
+                    os.remove(p_path)
+                except Exception:
+                    pass
+        if downloaded:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+    except Exception as e:
+        err = _vk_error_text(e)
+        config_manager.log_message("ERROR", f"send «{out_name}»: VK не отправил файл — {err}")
+        await message.answer(f"❌ Не удалось отправить файл «{out_name}»:\n{err}")
+    """`send_base64 <путь|url>` — прислать файл с обфускацией (base64 в .txt)."""
     parts = text.split(None, 1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.answer("Укажи файл или ссылку: send <путь|url>  (напр.: send 1.txt  или  send https://host/f.zip)")
+        await message.answer("Укажи файл или ссылку: send_base64 <путь|url>  (напр.: send_base64 1.txt  или  send_base64 https://host/f.zip)")
         return
     raw_arg = parts[1].strip().strip('"').strip("'")
 
@@ -1077,7 +1207,8 @@ HELP_TEXT = (
     "• art:last — повторно прислать последнюю картинку\n"
     "• art:doc <команда> — прислать результат документом (по умолчанию — фото)\n"
     "• bg: <команда> — фоновый запуск (вывод приходит по мере работы)\n"
-    "• send <файл|url> — прислать файл/папку с сервера или по ссылке (7z с паролем)\n"
+    "• send <файл|url> — прислать файл/папку с сервера или по ссылке (обычным документом, без обфускации)\n"
+    "• send_base64 <файл|url> — то же, но обфускация (base64 в .txt)\n"
     "• reset / сброс / exit — очистить сессию\n"
     "• 💀 Hard Reset — убить зависшую сессию\n"
     "• ctrl / ctrl+c — отправить SIGINT (прервать вывод)\n"
@@ -1167,7 +1298,16 @@ async def handle_message(message: Message):
         await message.answer(f"📚 Команды бота [v{config_manager.get_version()}]\n" + HELP_TEXT)
         return
 
-    # SEND <файл> — прислать файл с сервера в этот чат
+    # SEND_BASE64 <файл> — обфускация (base64 в .txt), т.е. прежнее поведение send
+    if lower_text == "send_base64" or lower_text.startswith("send_base64 "):
+        try:
+            await _send_b64_command(user_id, text_input, message)
+        except Exception as e:
+            config_manager.log_message("ERROR", f"Ошибка send_base64: {e}")
+            await message.answer(f"Ошибка отправки файла (base64): {e}")
+        return
+
+    # SEND <файл> — прислать файл с сервера в этот чат (обычным документом, без обфускации)
     if lower_text == "send" or lower_text.startswith("send "):
         try:
             await _send_file_command(user_id, text_input, message)

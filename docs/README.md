@@ -98,7 +98,8 @@ Logs: stdout + `logs/info.log` (INFO/WARNING) and `logs/error.log` (ERROR).
   - `art:last` — resend the last ART image
   - `art:doc <command>` — send result as a document (PNG) instead of a photo
 - `bg: <command>` — run in background; output arrives in chat as it is produced
-- `send <path|url>` — send a file/folder from the server or by URL to the chat **as a base64-encoded `.txt` document** (VK rejects protected/opaque archives, so contents are hidden by encoding). Streams big files and splits the result into ~95 MB parts if needed; each carry a join+decode hint for Linux/Windows.
+- `send <path|url>` — send a file/folder from the server or by URL to the chat **as a plain document** (original name/extension, no obfuscation). Big files are split into ~150 MB parts with a join hint.
+- `send_base64 <path|url>` — same, but **obfuscated**: contents base64-encoded into a `.txt` (VK rejects protected/opaque archives; handles big files). Decode it back yourself.
 - `reset` / `сброс` / `exit` — reset the session
 - `💀 Hard Reset` — kill a stuck session (new one is created on the next command)
 - `ctrl` / `ctrl+c` — send SIGINT to interrupt output
