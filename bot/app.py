@@ -527,75 +527,64 @@ def _fail_message_with_tmp(user_id: int, data: bytes, reason: str) -> str:
 async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = "", force_doc: bool = False):
     """Отправляет ART-картинку.
 
-    По умолчанию — фото-превью (инлайн); документ уходит только если фото не прошло.
-    При `force_doc=True` (команда `art:doc …`) сразу шлём документом.
+    По умолчанию — фото-превью (ручная загрузка с group_id); документ уходит, только
+    если фото не прошло. При `force_doc=True` (art:doc …) сразу шлём документом.
     Если VK не принял ничего — кладём PNG во временный файл и сообщаем путь.
     """
     # ── Принудительно документом (art:doc) ──
-    if force_doc and doc_uploader is not None:
-        try:
-            doc_attachment = await asyncio.wait_for(
-                doc_uploader.upload(file_source=image_bytes, peer_id=user_id, title="art.png"), timeout=30
-            )
-            await bot.api.messages.send(peer_id=user_id, message=caption, attachment=doc_attachment, random_id=0)
-            config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: документ (art:doc) отправлен")
-            return
-        except Exception as e_doc:
-            config_manager.log_message("ERROR", f"ART art:doc: документ не прошёл: {_vk_error_text(e_doc)}")
-            await bot.api.messages.send(
-                peer_id=user_id,
-                message=_fail_message_with_tmp(user_id, image_bytes, f"документ: {_vk_error_text(e_doc)}"),
-                random_id=0,
-            )
-            return
-
-    # ── 1) Фото-превью (PNG, с ретраями) ──
-    photo_err = None
-    if photo_uploader is not None:
-        for _attempt in range(1, 4):
+    if force_doc:
+        doc_attachment, doc_err = await _upload_document(image_bytes, user_id, "art.png")
+        if doc_attachment is not None:
             try:
-                if hasattr(photo_uploader, "upload"):
-                    attachment = await asyncio.wait_for(
-                        photo_uploader.upload(file_source=image_bytes, peer_id=user_id), timeout=30
-                    )
-                else:
-                    attachment = await asyncio.wait_for(
-                        photo_uploader.upload_photos(file_source=image_bytes, peer_id=user_id), timeout=30
-                    )
-                await bot.api.messages.send(peer_id=user_id, message=caption, attachment=attachment, random_id=0)
+                await bot.api.messages.send(
+                    peer_id=user_id, message=caption, attachment=doc_attachment, random_id=0
+                )
+                config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: документ (art:doc) отправлен")
+                return
+            except Exception as e_send:
+                doc_err = _vk_error_text(e_send)
+        await bot.api.messages.send(
+            peer_id=user_id,
+            message=_fail_message_with_tmp(user_id, image_bytes, f"документ: {doc_err}"),
+            random_id=0,
+        )
+        return
+
+    # ── 1) Фото-превью (ручная загрузка с group_id, с ретраями) ──
+    photo_err = None
+    for _attempt in range(1, 4):
+        attachment, perr = await _upload_photo(image_bytes, user_id, "art.png")
+        if attachment is not None:
+            try:
+                await bot.api.messages.send(
+                    peer_id=user_id, message=caption, attachment=attachment, random_id=0
+                )
                 config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: фото-превью отправлено")
                 return
-            except Exception as e_photo:
-                photo_err = e_photo
-                await asyncio.sleep(1)
+            except Exception as e_send:
+                photo_err = _vk_error_text(e_send)
+        else:
+            photo_err = perr
+        await asyncio.sleep(1)
 
     # ── 2) Фолбэк документом — ТОЛЬКО если фото не прошло ──
-    if doc_uploader is not None:
+    doc_attachment, doc_err = await _upload_document(image_bytes, user_id, "art.png")
+    if doc_attachment is not None:
         try:
-            doc_attachment = await asyncio.wait_for(
-                doc_uploader.upload(file_source=image_bytes, peer_id=user_id, title="art.png"), timeout=30
-            )
             await bot.api.messages.send(
                 peer_id=user_id,
-                message=(caption + f"\n⚠️ Фото не прошло ({_vk_error_text(photo_err)}); отправил документом (PNG)").strip(),
+                message=(caption + f"\n⚠️ Фото не прошло ({photo_err or '—'}); отправил документом (PNG)").strip(),
                 attachment=doc_attachment, random_id=0,
             )
             config_manager.log_message("INFO", f"Админ [{user_id}] art-картинка: документ (фолбэк) отправлен")
             return
-        except Exception as e_doc:
-            config_manager.log_message("ERROR", f"ART фото: {_vk_error_text(photo_err)}; документ: {_vk_error_text(e_doc)}")
-            await bot.api.messages.send(
-                peer_id=user_id,
-                message=_fail_message_with_tmp(
-                    user_id, image_bytes, f"фото: {_vk_error_text(photo_err)}; документ: {_vk_error_text(e_doc)}"
-                ),
-                random_id=0,
-            )
-            return
+        except Exception as e_send:
+            doc_err = _vk_error_text(e_send)
 
+    config_manager.log_message("ERROR", f"ART фото: {photo_err}; документ: {doc_err}")
     await bot.api.messages.send(
         peer_id=user_id,
-        message=_fail_message_with_tmp(user_id, image_bytes, f"фото: {_vk_error_text(photo_err)}"),
+        message=_fail_message_with_tmp(user_id, image_bytes, f"фото: {photo_err or '—'}; документ: {doc_err}"),
         random_id=0,
     )
 
@@ -743,6 +732,71 @@ async def _upload_document(data: bytes, peer_id: int, title: str):
             "ERROR",
             f"docs.save (title={title}, file_len={len(file_val)}): {err}",
         )
+        return None, err
+
+
+async def _upload_photo(data: bytes, peer_id: int, title: str = "art.png"):
+    """Загружает фото в сообщение (ручная реализация с group_id).
+
+    Аналог _upload_document: vkbottle `PhotoMessageUploader` не передаёт group_id,
+    из-за чего VK отвечает «photo is undefined». Возвращает (attachment, None) или (None, err).
+    """
+    import json
+
+    group_id = await _get_group_id()
+
+    try:
+        up_params = {"peer_id": peer_id}
+        if group_id is not None:
+            up_params["group_id"] = group_id
+        resp = await bot.api.request("photos.getMessagesUploadServer", up_params)
+        upload_url = resp["response"]["upload_url"]
+    except Exception as e:
+        err = _vk_error_text(e)
+        config_manager.log_message(
+            "ERROR", f"photos.getMessagesUploadServer (peer={peer_id}, group={group_id}): {err}"
+        )
+        return None, f"Не удалось получить upload_url (фото): {err}"
+
+    try:
+        import aiohttp
+        from io import BytesIO
+
+        form = aiohttp.FormData()
+        form.add_field("photo", BytesIO(data), filename=title)
+        timeout = aiohttp.ClientTimeout(total=120)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(upload_url, data=form) as up_resp:
+                raw_body = await up_resp.text()
+    except Exception as e:
+        config_manager.log_message("ERROR", f"POST фото на upload_url: {e}")
+        return None, f"загрузка фото на upload-сервер: {e}"
+
+    try:
+        up = json.loads(raw_body)
+    except Exception as e:
+        config_manager.log_message("ERROR", f"upload фото: не-JSON: {e}: {raw_body[:300]}")
+        return None, f"upload-сервер вернул не-JSON: {raw_body[:300]}"
+
+    if not isinstance(up, dict) or not up.get("photo"):
+        config_manager.log_message("ERROR", f"upload фото: нет `photo`; ответ: {raw_body[:400]}")
+        return None, f"upload-сервер не вернул `photo` (ответ: {raw_body[:300]})"
+
+    try:
+        saved = await bot.api.request(
+            "photos.saveMessagesPhoto",
+            {"server": up.get("server"), "photo": up.get("photo"), "hash": up.get("hash")},
+        )
+        item = saved["response"][0]
+        owner = item["owner_id"]
+        pid = item["id"]
+        key = item.get("access_key")
+        att = f"photo{owner}_{pid}_{key}" if key else f"photo{owner}_{pid}"
+        config_manager.log_message("INFO", f"photos.saveMessagesPhoto OK: {att}")
+        return att, None
+    except Exception as e:
+        err = _vk_error_text(e)
+        config_manager.log_message("ERROR", f"photos.saveMessagesPhoto: {err}")
         return None, err
 
 

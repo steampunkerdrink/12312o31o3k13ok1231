@@ -7,6 +7,16 @@
 
 ---
 
+## [5.16.8] — 2026-10-18
+
+### Исправлено
+- **ART-картинки не отправлялись**: VK отвечал `photo is undefined` (фото) и
+  `file is undefined` (документ-фолбэк). Та же причина, что была у `send` — vkbottle
+  `PhotoMessageUploader`/`DocMessagesUploader` не передают `group_id` для бота-сообщества.
+  Добавлена ручная `_upload_photo` (photos.getMessagesUploadServer + POST + photos.saveMessagesPhoto
+  с `group_id`); ART-фото и документ (`art:doc`/фолбэк) теперь идут через неё и через
+  `_upload_document` (уже с `group_id`).
+
 ## [5.16.7] — 2026-10-18
 
 ### Исправлено / улучшено
