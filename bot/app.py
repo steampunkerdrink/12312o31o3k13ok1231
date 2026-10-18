@@ -436,7 +436,7 @@ async def _create_session(user_id: int, api):
     # Алиасы НЕ хардкодим: сессия интерактивная, bash сам читает реальный ~/.bashrc.
     # Стартовую папку/инициализацию задаёт config/entrypoint.txt (v5.11.0).
     entry = config_manager.get_entrypoint()
-    init_cmd = "stty -echo\nstty -icanon\nPS1=''\nPS2=''\n"
+    init_cmd = "stty -echo\nstty -icanon\nPS1=''\nPS2=''\nPROMPT_COMMAND=''\n"
     if entry.get("workdir"):
         init_cmd += f"cd {entry['workdir']}\n"
         shell_worker.last_valid_path = entry["workdir"]

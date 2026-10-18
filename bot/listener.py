@@ -30,8 +30,13 @@ session_ready = set()
 
 
 def discard_output(user_id: int):
-    """Выбрасывает весь накопленный, но ещё не отправленный вывод пользователя."""
-    output_buffers[user_id] = []
+    """Выбрасывает весь накопленный, но ещё не отправленный вывод пользователя.
+
+    Очищаем список НА МЕСТЕ (.clear), а не пересоздаём его: фоновый слушатель держит
+    ссылку на исходный объект buffer, и «= []» не дотягивалось до него → стартовый
+    мусор (промпт, зонд __SESS_READY__, титл) просачивался в первый вывод.
+    """
+    output_buffers.setdefault(user_id, []).clear()
 
 # ИСПРАВЛЕНО (v5.2.1): Кэш путей теперь монолитно живёт здесь, решая проблему Circular Import!
 last_valid_path = "/root"
@@ -54,9 +59,14 @@ last_activity = {}
 
 # Синтаксически корректный Regex для удаления ANSI-кодов цвета
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-9;?]*[a-zA-Z])')
+# OSC: ESC ] ... BEL/ST  — например титул окна терминала (0;user@host:path)
+OSC_ESCAPE = re.compile(r'\x1B\][^\x07]*(?:\x07|\x1b\\)')
 
 def clean_terminal_garbage(text: str) -> str:
     """Очищает вывод от ANSI-кодов и скрытых системных хвостов PTY"""
+    # OSC удаляем ДО ANSI: диапазон \x1b[\\-_] в ANSI_ESCAPE может съесть «\x1b]»
+    # слишком рано, и тогда от титула останется голый «0;user@host:…».
+    text = OSC_ESCAPE.sub('', text)
     text = ANSI_ESCAPE.sub('', text)
     text = text.replace("[?2004h", "").replace("[?2004l", "")
     
