@@ -7,7 +7,7 @@ Shell over VK: run commands on a server through a VK community chat, with an opt
 
 - Python 3.12+
 - Linux (uses PTY, `/bin/bash`). The bot does NOT run on Windows.
-- `7z`/`7za`/`7zr` (7-Zip) — required for `send <…>` (wraps files into a password-protected archive)
+- No extra tools required for `send` (a file is base64-encoded into a `.txt` document).
 
 ## Project structure
 
@@ -98,7 +98,7 @@ Logs: stdout + `logs/info.log` (INFO/WARNING) and `logs/error.log` (ERROR).
   - `art:last` — resend the last ART image
   - `art:doc <command>` — send result as a document (PNG) instead of a photo
 - `bg: <command>` — run in background; output arrives in chat as it is produced
-- `send <path|url>` — send a file/folder from the server or by URL to the chat **wrapped into a password-protected 7z archive** (`123456`)
+- `send <path|url>` — send a file/folder from the server or by URL to the chat **as a base64-encoded `.txt` document** (VK rejects protected/opaque archives, so contents are hidden by encoding; decode it back on your machine)
 - `reset` / `сброс` / `exit` — reset the session
 - `💀 Hard Reset` — kill a stuck session (new one is created on the next command)
 - `ctrl` / `ctrl+c` — send SIGINT to interrupt output

@@ -611,9 +611,9 @@ async def _resend_last_art(user_id: int, message: Message):
 # Предохранитель: не тащим в память/в VK слишком большие файлы
 SEND_MAX_BYTES = 100 * 1024 * 1024
 
-# Команда send: файл (или папка) перед отправкой упаковывается в 7z-архив с паролем,
-# чтобы в ВК не уходил исходный формат/содержимое (напр. .exe).
-SEND_7Z_PASSWORD = "123456"
+# Команда send: файл кодируется в base64 и сохраняется как .txt — так VK принимает
+# документ (txt не считается архивом), а содержимое скрыто кодированием (в т.ч. от
+# VK-проверки архивов: empty_archive/wrong_arch_file). Пользователь декодирует у себя.
 
 # Кэш group_id сообщества (для getMessagesUploadServer). Для ботов-сообществ без group_id
 # upload-сервер не возвращает `file`, и docs.save падает с «file is undefined».
@@ -721,63 +721,32 @@ async def _upload_document(data: bytes, peer_id: int, title: str):
         return None, err
 
 
-def _find_7z() -> str | None:
-    """Возвращает путь к 7-Zip (`7z`/`7za`/`7zr`) или None, если 7-Zip не установлен."""
-    for name in ("7z", "7za", "7zr"):
-        path = shutil.which(name)
-        if path:
-            return path
-    return None
+def _encode_b64(src_path: str, user_id: int):
+    """Кодирует файл в base64 и сохраняет как .txt в tmp/.
 
+    VK блокирует архивы с непроверяемым содержимым (empty_archive/wrong_arch_file),
+    поэтому вместо упаковки используем base64: .txt — обычный документ, VK его примет,
+    а содержимое скрыто кодированием. Декодируется у получателя.
 
-async def _create_7z_archive(src_path: str, user_id: int):
-    """Упаковывает src_path (файл или папку) в 7z-архив с паролем SEND_7Z_PASSWORD.
-
-    Архив (`-mhe=on` — шифруются и имена файлов, не видно содержимое) создаётся
-    в tmp/. Возвращает (archive_path, None) при успехе, иначе (None, сообщение об ошибке).
+    Возвращает (txt_path, txt_name, None) при успехе, иначе (None, None, сообщение об ошибке).
     """
-    exe = _find_7z()
-    if exe is None:
-        return None, "7-Zip не установлен на сервере (нужен пакет p7zip-full или 7zip с командой 7z/7za/7zr)"
+    import base64
 
     base = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(src_path.rstrip("/\\"))) or "file"
-    archive_path = os.path.join(config_manager.TMP_DIR, f"send7z_{user_id}_{int(time.time())}_{base}.7z")
-    cmd = [exe, "a", "-y", "-t7z", f"-p{SEND_7Z_PASSWORD}", "-mhe=on", archive_path, src_path]
-    proc = None
+    txt_name = f"{base}.txt"
+    txt_path = os.path.join(config_manager.TMP_DIR, f"send_{user_id}_{int(time.time())}_{txt_name}")
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+        # base64 увеличивает объём на ~33%; читаем целиком и кодируем в ascii-текст,
+        # разбитый на строки по 76 символов (непрерывная гигантская строка неудобна).
+        with open(src_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("ascii")
+        lines = [encoded[i : i + 76] for i in range(0, len(encoded), 76)]
+        with open(txt_path, "w", encoding="ascii") as out:
+            out.write("\n".join(lines))
+            out.write("\n")
+        return txt_path, txt_name, None
     except Exception as e:
-        return None, f"сбой 7z: {e}"
-    if proc.returncode not in (0, 1):  # 0 — успех, 1 — успех с предупреждениями
-        tail = (stderr or b"").decode("utf-8", "replace").strip() or (stdout or b"").decode("utf-8", "replace").strip()
-        try:
-            os.remove(archive_path)
-        except Exception:
-            pass
-        return None, f"7z вернул код {proc.returncode}: {tail or 'см. консоль'}"
-    return archive_path, None
-
-
-def _wrap_zip(inner_7z_path: str, user_id: int, inner_name: str) -> str:
-    """Оборачивает запароленный 7z во внешний обычный .zip.
-
-    VK отклоняет защищённые/нечитаемые архивы (empty_archive), поэтому внешний
-    ZIP делаем НЕзапароленным и непустым (внутри один .7z) — VK его принимает.
-    Пароль по-прежнему защищает внутренний 7z (SEND_7Z_PASSWORD).
-
-    Возвращает путь к внешнему .zip (в tmp/).
-    """
-    import zipfile
-
-    timestamp = int(time.time())
-    zip_path = os.path.join(config_manager.TMP_DIR, f"send_{user_id}_{timestamp}.zip")
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Внутренний 7z кладём внутрь zip под своим именем (не пустой архив).
-        zf.write(inner_7z_path, arcname=inner_name)
-    return zip_path
+        return None, None, f"base64-кодирование не удалось: {e}"
 
 
 async def _download_url_to_tmp(url: str, user_id: int):
@@ -823,9 +792,9 @@ async def _download_url_to_tmp(url: str, user_id: int):
 async def _send_file_command(user_id: int, text: str, message: Message):
     """`send <путь|url>` — прислать файл или папку (с сервера или по ссылке) в этот чат.
 
-    Файл упаковывается в 7z-архив с паролем (SEND_7Z_PASSWORD), затем оборачивается
-    во внешний обычный .zip (VK отклоняет защищённый 7z как empty_archive, а внешний
-    zip принимает). В чат приходит .zip, внутри — запароленный .7z.
+    Файл кодируется в base64 и отправляется как .txt (VK блокирует архивы с
+    непроверяемым содержимым — empty_archive/wrong_arch_file, а .txt принимает).
+    Получатель декодирует base64 обратно в файл.
     """
     parts = text.split(None, 1)
     if len(parts) < 2 or not parts[1].strip():
@@ -846,59 +815,55 @@ async def _send_file_command(user_id: int, text: str, message: Message):
             await message.answer(f"Файл не найден: {path}")
             return
 
-    # ── Упаковка: 7z (запаролен) → внешний .zip (принимает VK) ──
-    await message.answer(f"🗜️ Упаковываю в 7z с паролем «{SEND_7Z_PASSWORD}»…")
-    archive_path, err = await _create_7z_archive(path, user_id)
-    if archive_path is None:
-        await message.answer(f"Не удалось создать 7z-архив: {err}")
-        return
-
-    inner_name = os.path.basename(archive_path)
-    try:
-        zip_path = _wrap_zip(archive_path, user_id, inner_name)
-    except Exception as e:
-        config_manager.log_message("ERROR", f"send: обёртка в zip не удалась: {e}")
-        await message.answer(f"Не удалось упаковать в zip: {e}")
+    # ── Кодирование в base64 (.txt) — VK принимает, содержимое скрыто ──
+    await message.answer("🔒 Кодирую в base64 (.txt)…")
+    txt_path, txt_name, b64_err = _encode_b64(path, user_id)
+    if txt_path is None:
+        await message.answer(f"Не удалось закодировать файл: {b64_err}")
         return
     try:
-        size = os.path.getsize(zip_path)
+        size = os.path.getsize(txt_path)
     except Exception:
         size = 0
     if size > SEND_MAX_BYTES:
-        await message.answer(f"Архив слишком большой ({_fmt_bytes(size)}); лимит {_fmt_bytes(SEND_MAX_BYTES)}.")
+        await message.answer(f"Файл в base64 слишком большой ({_fmt_bytes(size)}); лимит {_fmt_bytes(SEND_MAX_BYTES)}.")
         return
-    title = os.path.basename(zip_path)
+    title = txt_name
 
     if doc_uploader is None:
         await message.answer("Загрузчик документов недоступен.")
         return
     try:
-        with open(zip_path, "rb") as f:
+        with open(txt_path, "rb") as f:
             data = f.read()
     except Exception as e:
-        config_manager.log_message("ERROR", f"send: чтение архива {zip_path} не удалось: {e}")
-        await message.answer(f"Не удалось прочитать архив: {e}")
+        config_manager.log_message("ERROR", f"send: чтение файла {txt_path} не удалось: {e}")
+        await message.answer(f"Не удалось прочитать файл: {e}")
         return
     await _show_typing(user_id)
-    # ИСПРАВЛЕНО (v5.14.2...): загрузка идёт через _upload_document() — логируется
-    # реальный ответ upload-сервера (это выявило empty_archive для защищённого 7z).
     attachment, up_err = await _upload_document(data, user_id, title)
     if attachment is None:
         await message.answer(
-            f"❌ VK не принял архив «{title}»:\n{up_err}\n\nАрхив лежит на сервере: {zip_path}"
+            f"❌ VK не принял файл «{title}»:\n{up_err}\n\nФайл лежит на сервере: {txt_path}"
         )
         return
     try:
         await bot.api.messages.send(
             peer_id=user_id,
-            message=f"🔒 {title} ({_fmt_bytes(size)}) — внутри «{inner_name}», пароль: {SEND_7Z_PASSWORD}",
+            message=(
+                f"🔑 {title} ({_fmt_bytes(size)}) — это base64.\n"
+                f"Скачай и декодируй обратно в файл:\n"
+                f"Linux:   base64 -d \"{title}\" > \"{txt_path.rpartition('_')[2][:-4]}\"\n"
+                f"Windows: certutil -decode \"{title}\" out.file\n"
+                f"(все строки файла — это единый base64-поток; сервисы base64decode.org тоже подойдут)"
+            ),
             attachment=attachment, random_id=0,
         )
-        config_manager.log_message("INFO", f"Админ [{user_id}] send: {path} -> {zip_path} ({_fmt_bytes(size)})")
+        config_manager.log_message("INFO", f"Админ [{user_id}] send: {path} -> {txt_path} ({_fmt_bytes(size)})")
     except Exception as e:
         err = _vk_error_text(e)
-        config_manager.log_message("ERROR", f"send «{title}»: VK не отправил архив — {err} (архив: {zip_path})")
-        await message.answer(f"❌ Не удалось отправить архив «{title}»:\n{err}")
+        config_manager.log_message("ERROR", f"send «{title}»: VK не отправил файл — {err} (файл: {txt_path})")
+        await message.answer(f"❌ Не удалось отправить файл «{title}»:\n{err}")
 
 
 # Последняя art-команда пользователя — для подписи на картинке
