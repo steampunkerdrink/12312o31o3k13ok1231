@@ -550,9 +550,10 @@ async def _send_image_to_user(user_id: int, image_bytes: bytes, caption: str = "
         )
         return
 
-    # ── 1) Фото-превью (ручная загрузка с group_id, с ретраями) ──
+    # ── 1) Фото-превью (ручная загрузка с group_id) ──
+    # _upload_photo внутри уже пробует PNG и JPEG, поэтому внешний ретрай не нужен.
     photo_err = None
-    for _attempt in range(1, 4):
+    for _attempt in range(1, 2):
         attachment, perr = await _upload_photo(image_bytes, user_id, "art.png")
         if attachment is not None:
             try:
@@ -770,6 +771,7 @@ async def _upload_photo(data: bytes, peer_id: int, title: str = "art.png"):
                 up_params["group_id"] = group_id
             resp = await bot.api.request("photos.getMessagesUploadServer", up_params)
             upload_url = resp["response"]["upload_url"]
+            config_manager.log_message("INFO", f"photos.getMessagesUploadServer URL: {upload_url[:110]}")
         except Exception as e:
             last_err = f"getMessagesUploadServer: {_vk_error_text(e)}"
             config_manager.log_message(
