@@ -853,6 +853,7 @@ async def _send_file_command(user_id: int, text: str, message: Message):
     raw_arg = parts[1].strip().strip('"').strip("'")
 
     display_name = None
+    downloaded = False
 
     if raw_arg.lower().startswith(("http://", "https://")):
         await message.answer(f"⏬ Скачиваю: {raw_arg}")
@@ -862,6 +863,7 @@ async def _send_file_command(user_id: int, text: str, message: Message):
             return
         # Для URL используем исходное имя (путь содержит служебный префикс dl_<id>_).
         display_name = info if isinstance(info, str) else None
+        downloaded = True
     else:
         base = shell_worker.last_valid_path or "/"
         path = os.path.expanduser(raw_arg if os.path.isabs(raw_arg) else os.path.join(base, raw_arg))
@@ -929,6 +931,20 @@ async def _send_file_command(user_id: int, text: str, message: Message):
         )
         config_manager.log_message(
             "INFO", f"Админ [{user_id}] send: {path} -> {len(parts)} txt-части ({_fmt_bytes(total_text)})"
+        )
+        # Временные файлы больше не нужны — вычищаем tmp-части и (если качали) исходник.
+        for p_path, _p_name, _p_size in parts:
+            try:
+                os.remove(p_path)
+            except Exception:
+                pass
+        if downloaded:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+        config_manager.log_message(
+            "INFO", f"send: убрано временных файлов: {len(parts) + (1 if downloaded else 0)}"
         )
     except Exception as e:
         err = _vk_error_text(e)
