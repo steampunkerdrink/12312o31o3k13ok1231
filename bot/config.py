@@ -43,7 +43,7 @@ except Exception as e:
     print(f"[config] Не удалось создать {TMP_DIR}: {e}", flush=True)
 
 # Единый источник версии для всего проекта (замечание №2 в AGENTS.md)
-VERSION = "5.16.8"
+VERSION = "5.16.9"
 
 dynamic_commands_map = {}
 

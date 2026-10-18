@@ -992,6 +992,13 @@ async def _self_update(user_id: int, message: Message):
         _self_update_running = False
 
 
+def _syntax_check(paths):
+    """Проверяет, что файлы компилируются, без запуска subprocess (без пайпов)."""
+    import py_compile
+    for p in paths:
+        py_compile.compile(p, doraise=True)
+
+
 async def _do_self_update(user_id: int, message: Message):
     """Self-update: git pull в папке бота (ff-only) + перезапуск процесса.
 
@@ -1083,34 +1090,34 @@ async def _do_self_update(user_id: int, message: Message):
         await message.answer(f"❌ git pull упал (code {rc}):\n{text[:500]}")
         return
 
-    # Проверяем, что новый код хотя бы компилируется; иначе откатываем pull.
-    config_manager.log_message("INFO", "self-update: py_compile старт")
+    # Проверяем, что новый код хотя бы компилируется — в потоке, без subprocess/пайпов
+    # (на сервере create_subprocess_exec с PIPE подвисал). Иначе откатываем pull.
+    config_manager.log_message("INFO", "self-update: syntax check старт")
     try:
-        pc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "py_compile",
-            os.path.join(base, "bot", "app.py"),
-            os.path.join(base, "bot", "config.py"),
-            os.path.join(base, "bot", "listener.py"),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        await asyncio.to_thread(
+            _syntax_check,
+            [
+                os.path.join(base, "bot", "app.py"),
+                os.path.join(base, "bot", "config.py"),
+                os.path.join(base, "bot", "listener.py"),
+            ],
         )
-        pc_out, pc_err = await pc.communicate()
     except Exception as e:
-        config_manager.log_message("ERROR", f"self-update: py_compile не запустился: {e}")
-        await message.answer(f"❌ py_compile не запустился: {e}")
-        return
-    config_manager.log_message("INFO", f"self-update: py_compile code={pc.returncode}")
-    if pc.returncode != 0:
-        pcerr = (pc_err or pc_out or b"").decode("utf-8", "replace").strip()
-        config_manager.log_message("ERROR", f"self-update: новый код не прошёл py_compile — откат: {pcerr}")
-        await message.answer(f"❌ Новый код не прошёл py_compile, откатываю pull и не перезапускаюсь.\n{pcerr[:400]}")
+        pcerr = f"{type(e).__name__}: {e}"
+        config_manager.log_message("ERROR", f"self-update: новый код не прошёл проверку — откат: {pcerr}")
+        await message.answer(
+            f"❌ Новый код не прошёл проверку синтаксиса, откатываю pull и не перезапускаюсь.\n{pcerr[:400]}"
+        )
         try:
             await asyncio.create_subprocess_exec(
                 "git", "-C", base, "reset", "--hard", "HEAD@{1}",
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
-        except Exception as e:
-            config_manager.log_message("WARNING", f"self-update: откат pull не удался: {e}")
+        except Exception as e2:
+            config_manager.log_message("WARNING", f"self-update: откат pull не удался: {e2}")
         return
+    config_manager.log_message("INFO", "self-update: syntax check ok")
 
     await message.answer(f"✅ git pull: {text or 'ок'}\n🔁 Перезапускаюсь…")
     await asyncio.sleep(1.5)
