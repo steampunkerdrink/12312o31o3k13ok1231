@@ -615,6 +615,52 @@ SEND_MAX_BYTES = 100 * 1024 * 1024
 # чтобы в ВК не уходил исходный формат/содержимое (напр. .exe).
 SEND_7Z_PASSWORD = "123456"
 
+# Кэш group_id сообщества (для getMessagesUploadServer). Для ботов-сообществ без group_id
+# upload-сервер не возвращает `file`, и docs.save падает с «file is undefined».
+_GROUP_ID_CACHE: int | None = None
+
+
+async def _get_group_id() -> int | None:
+    """Возвращает ID группы-сообщества (для загрузчиков). Кэшируется после первого запроса."""
+    global _GROUP_ID_CACHE
+    if _GROUP_ID_CACHE is not None:
+        return _GROUP_ID_CACHE
+    try:
+        resp = await bot.api.request("groups.getById", {})
+        items = resp.get("response", {}).get("groups", []) if isinstance(resp, dict) else []
+        if items:
+            _GROUP_ID_CACHE = items[0].get("id")
+            config_manager.log_message("INFO", f"_get_group_id: group_id={_GROUP_ID_CACHE}")
+    except Exception as e:
+        config_manager.log_message("ERROR", f"Не удалось получить group_id: {e}")
+    return _GROUP_ID_CACHE
+
+
+async def _upload_document(data: bytes, peer_id: int, title: str):
+    """Загружает документ в чат через DocMessagesUploader с передачей group_id.
+
+    Возвращает (attachment_string, None) при успехе, иначе (None, сообщение об ошибке).
+    Ошибка логируется с деталями (в т.ч. реальной причиной вместо общего «file is undefined»).
+    """
+    if doc_uploader is None:
+        return None, "Загрузчик документов недоступен."
+    group_id = await _get_group_id()
+    kwargs = {"file_source": data, "peer_id": peer_id, "title": title}
+    if group_id is not None:
+        kwargs["group_id"] = group_id
+    try:
+        attachment = await asyncio.wait_for(
+            doc_uploader.upload(**kwargs), timeout=180
+        )
+        return attachment, None
+    except Exception as e:
+        err = _vk_error_text(e)
+        config_manager.log_message(
+            "ERROR",
+            f"upload doc «{title}» в чат {peer_id} не удался (group_id={group_id}): {err}",
+        )
+        return None, err
+
 
 def _find_7z() -> str | None:
     """Возвращает путь к 7-Zip (`7z`/`7za`/`7zr`) или None, если 7-Zip не установлен."""
@@ -747,10 +793,16 @@ async def _send_file_command(user_id: int, text: str, message: Message):
         await message.answer(f"Не удалось прочитать архив: {e}")
         return
     await _show_typing(user_id)
-    try:
-        attachment = await asyncio.wait_for(
-            doc_uploader.upload(file_source=data, peer_id=user_id, title=title), timeout=180
+    # ИСПРАВЛЕНО (v5.14.1): загрузка идёт через _upload_document() — передаётся group_id
+    # сообщества (без него upload-сервер не возвращает file → «file is undefined») и
+    # логируется реальная причина сбоя.
+    attachment, up_err = await _upload_document(data, user_id, title)
+    if attachment is None:
+        await message.answer(
+            f"❌ VK не принял архив «{title}»:\n{up_err}\n\nПароль: {SEND_7Z_PASSWORD}\nАрхив лежит на сервере: {archive_path}"
         )
+        return
+    try:
         await bot.api.messages.send(
             peer_id=user_id,
             message=f"🔒 {title} ({_fmt_bytes(size)}) — пароль: {SEND_7Z_PASSWORD}",
@@ -759,10 +811,8 @@ async def _send_file_command(user_id: int, text: str, message: Message):
         config_manager.log_message("INFO", f"Админ [{user_id}] send: {path} -> {archive_path} ({_fmt_bytes(size)})")
     except Exception as e:
         err = _vk_error_text(e)
-        config_manager.log_message("ERROR", f"send «{title}»: VK не принял файл — {err} (архив: {archive_path})")
-        await message.answer(
-            f"❌ VK не принял архив «{title}»:\n{err}\n\nПароль: {SEND_7Z_PASSWORD}\nАрхив лежит на сервере: {archive_path}"
-        )
+        config_manager.log_message("ERROR", f"send «{title}»: VK не отправил архив — {err} (архив: {archive_path})")
+        await message.answer(f"❌ Не удалось отправить архив «{title}»:\n{err}")
 
 
 # Последняя art-команда пользователя — для подписи на картинке
