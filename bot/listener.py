@@ -99,11 +99,18 @@ async def send_safe_message(api, peer_id: int, text: str, is_interactive: bool =
             try:
                 base_delay = config_manager.get_dynamic_delay()
                 actual_delay = base_delay * current_flood_multiplier
-                
+
                 msg_body = chunk
                 if is_interactive:
                     msg_body = f"⚠️ [PTY INTERACTIVE MODE]\n---------------------------\n{chunk}"
-                    
+
+                # Показываем «печатает…» перед выдачей очередной порции потокового вывода
+                # (bg:, интерактив). Ошибки игнорируем — это косметика.
+                try:
+                    await api.messages.set_activity(type="typing", peer_id=peer_id)
+                except Exception:
+                    pass
+
                 await api.messages.send(peer_id=peer_id, message=f"```\n{msg_body}\n```", keyboard=current_kb, random_id=0)
                 if current_flood_multiplier > 1.0:
                     current_flood_multiplier = max(1.0, current_flood_multiplier - 0.5)
@@ -231,6 +238,11 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                     if not _is_alive():
                         return
                     last_activity[user_id] = time.time()
+                    # Показываем «печатает…» перед выдачей результата (потоковый/интерактив/длинный).
+                    try:
+                        await api.messages.set_activity(type="typing", peer_id=user_id)
+                    except Exception:
+                        pass
                     if clean_text and len(clean_text) > 3500:
                         # Длинный вывод: шапка отдельным сообщением, тело — нарезанными частями
                         # (лимит текста VK 9000; send_safe_message режет по 3500 и следит за флудом)
