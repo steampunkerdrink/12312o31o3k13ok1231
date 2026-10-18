@@ -954,7 +954,6 @@ async def _do_self_update(user_id: int, message: Message):
         "GIT_ASKPASS": "/bin/true",
         "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15",
     }
-    proc = None
     config_manager.log_message("INFO", f"self-update: git pull старт (base={base})")
 
     # Пока идёт pull, раз в 10 c шлём heartbeat, чтобы не было «молчания».
@@ -968,42 +967,66 @@ async def _do_self_update(user_id: int, message: Message):
         except Exception:
             pass
 
+    # Вывод git пишем в файл: при таймауте сможем показать, на чём он завис.
+    log_path = os.path.join(config_manager.TMP_DIR, "self_update_git.log")
     hb = asyncio.create_task(_pull_heartbeat())
+    rc = None
+    timed_out = False
+    start_err = None
+    proc = None
+    lf = None
     try:
+        lf = open(log_path, "wb")
         proc = await asyncio.create_subprocess_exec(
             "git",
             "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=20",
             "-C", base, "pull", "--ff-only",
             stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            stdout=lf, stderr=asyncio.subprocess.STDOUT,
             env=git_env,
         )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=90)
+        rc = await asyncio.wait_for(proc.wait(), timeout=60)
     except asyncio.TimeoutError:
+        timed_out = True
         try:
             if proc is not None:
                 proc.kill()
         except Exception:
             pass
-        config_manager.log_message("ERROR", "self-update: git pull не ответил за 90 c")
-        await message.answer("❌ git pull не ответил за 90 c (сеть/аутентификация). Проверь git вручную.")
-        return
     except Exception as e:
-        config_manager.log_message("ERROR", f"self-update: git pull сбой: {e}")
-        await message.answer(f"❌ git pull не выполнился: {e}")
-        return
+        start_err = e
     finally:
+        if lf is not None:
+            try:
+                lf.close()
+            except Exception:
+                pass
         hb.cancel()
         try:
             await hb
         except (asyncio.CancelledError, Exception):
             pass
 
-    text = (out or b"").decode("utf-8", "replace").strip() or (err or b"").decode("utf-8", "replace").strip()
-    config_manager.log_message("INFO", f"self-update: git pull завершён code={proc.returncode}: {text[:300]}")
-    if proc.returncode != 0:
-        config_manager.log_message("ERROR", f"self-update: git pull code {proc.returncode}: {text}")
-        await message.answer(f"❌ git pull упал (code {proc.returncode}):\n{text[:500]}")
+    text = ""
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as rf:
+            text = rf.read().strip()
+    except Exception as e:
+        config_manager.log_message("WARNING", f"self-update: чтение лога git: {e}")
+
+    if start_err is not None:
+        config_manager.log_message("ERROR", f"self-update: git pull не запустился: {start_err}")
+        await message.answer(f"❌ git pull не запустился: {start_err}")
+        return
+    if timed_out:
+        tail = text[-500:] if text else "вывода нет (похоже, висит соединение/SSH)"
+        config_manager.log_message("ERROR", f"self-update: git pull таймаут 60 c; вывод: {tail}")
+        await message.answer(f"❌ git pull не ответил за 60 c. Последний вывод git:\n{tail}")
+        return
+    config_manager.log_message("INFO", f"self-update: git pull завершён code={rc}: {text[:300]}")
+    if rc != 0:
+        config_manager.log_message("ERROR", f"self-update: git pull code {rc}: {text}")
+        await message.answer(f"❌ git pull упал (code {rc}):\n{text[:500]}")
         return
 
     # Проверяем, что новый код хотя бы компилируется; иначе откатываем pull.
