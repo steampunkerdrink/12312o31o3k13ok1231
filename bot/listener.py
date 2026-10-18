@@ -38,6 +38,31 @@ def discard_output(user_id: int):
     """
     output_buffers.setdefault(user_id, []).clear()
 
+# Кэш group_id сообщества — для messages.setActivity (typing).
+_group_id_cache = {"id": None}
+
+
+async def _send_typing(api, peer_id: int):
+    """Показывает «печатает…» в диалоге (messages.setActivity).
+
+    В vkbottle 4.11 нет `api.messages.set_activity`, поэтому зовём метод напрямую.
+    Для бота-сообщества нужен group_id — получаем один раз и кэшируем.
+    """
+    try:
+        params = {"type": "typing", "peer_id": peer_id}
+        gid = _group_id_cache["id"]
+        if gid is None:
+            resp = await api.request("groups.getById", {})
+            items = resp.get("response", {}).get("groups", []) if isinstance(resp, dict) else []
+            if items:
+                gid = items[0].get("id")
+                _group_id_cache["id"] = gid
+        if gid is not None:
+            params["group_id"] = gid
+        await api.request("messages.setActivity", params)
+    except Exception:
+        pass
+
 # ИСПРАВЛЕНО (v5.2.1): Кэш путей теперь монолитно живёт здесь, решая проблему Circular Import!
 last_valid_path = "/root"
 
@@ -106,10 +131,7 @@ async def send_safe_message(api, peer_id: int, text: str, is_interactive: bool =
 
                 # Показываем «печатает…» перед выдачей очередной порции потокового вывода
                 # (bg:, интерактив). Ошибки игнорируем — это косметика.
-                try:
-                    await api.messages.set_activity(type="typing", peer_id=peer_id)
-                except Exception:
-                    pass
+                await _send_typing(api, peer_id)
 
                 await api.messages.send(peer_id=peer_id, message=f"```\n{msg_body}\n```", keyboard=current_kb, random_id=0)
                 if current_flood_multiplier > 1.0:
@@ -239,10 +261,7 @@ async def start_output_listener(user_id: int, process_reader, api, process, toke
                         return
                     last_activity[user_id] = time.time()
                     # Показываем «печатает…» перед выдачей результата (потоковый/интерактив/длинный).
-                    try:
-                        await api.messages.set_activity(type="typing", peer_id=user_id)
-                    except Exception:
-                        pass
+                    await _send_typing(api, user_id)
                     if clean_text and len(clean_text) > 3500:
                         # Длинный вывод: шапка отдельным сообщением, тело — нарезанными частями
                         # (лимит текста VK 9000; send_safe_message режет по 3500 и следит за флудом)

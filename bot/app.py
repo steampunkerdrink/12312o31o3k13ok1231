@@ -97,9 +97,18 @@ except TypeError:
 
 
 async def _show_typing(user_id: int):
-    """Статус «печатает…». Это НЕ сообщение в чат (messages.setActivity) — не спамит ВК."""
+    """Статус «печатает…» (messages.setActivity) — не спамит чат.
+
+    ИСПРАВЛЕНО (v5.16.2): в vkbottle 4.11 нет `api.messages.set_activity`, поэтому
+    прежний вызов молча падал (AttributeError глотался). Зовём метод напрямую.
+    Для бота-сообщества передаём group_id.
+    """
     try:
-        await bot.api.messages.set_activity(type="typing", peer_id=user_id)
+        params = {"type": "typing", "peer_id": user_id}
+        group_id = await _get_group_id()
+        if group_id is not None:
+            params["group_id"] = group_id
+        await bot.api.request("messages.setActivity", params)
     except Exception:
         pass
 
