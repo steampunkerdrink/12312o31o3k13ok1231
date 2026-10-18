@@ -637,27 +637,86 @@ async def _get_group_id() -> int | None:
 
 
 async def _upload_document(data: bytes, peer_id: int, title: str):
-    """Загружает документ в чат через DocMessagesUploader с передачей group_id.
+    """Загружает документ в чат (собственная реализация с полной диагностикой).
+
+    Обходит `vkbottle.DocMessagesUploader`, чтобы видеть реальный ответ
+    upload-сервера: при сбое `file is undefined` было непонятно, где именно
+    теряется `file`. Здесь логируется каждый шаг: получение upload_url,
+    HTTP-POST файла (сырой ответ сервера), затем docs.save.
 
     Возвращает (attachment_string, None) при успехе, иначе (None, сообщение об ошибке).
-    Ошибка логируется с деталями (в т.ч. реальной причиной вместо общего «file is undefined»).
     """
+    import json
+
     if doc_uploader is None:
         return None, "Загрузчик документов недоступен."
+
     group_id = await _get_group_id()
-    kwargs = {"file_source": data, "peer_id": peer_id, "title": title}
-    if group_id is not None:
-        kwargs["group_id"] = group_id
+
+    # 1) Получаем upload_url для загрузки документа в диалог.
     try:
-        attachment = await asyncio.wait_for(
-            doc_uploader.upload(**kwargs), timeout=180
+        up_params = {"peer_id": peer_id}
+        if group_id is not None:
+            up_params["group_id"] = group_id
+        resp = await bot.api.request("docs.getMessagesUploadServer", up_params)
+        upload_url = resp["response"]["upload_url"]
+        config_manager.log_message(
+            "INFO", f"getMessagesUploadServer OK (['upload_url']={upload_url[:80]}…)"
         )
-        return attachment, None
     except Exception as e:
         err = _vk_error_text(e)
         config_manager.log_message(
             "ERROR",
-            f"upload doc «{title}» в чат {peer_id} не удался (group_id={group_id}): {err}",
+            f"getMessagesUploadServer (peer_id={peer_id}, group_id={group_id}): {err}",
+        )
+        return None, f"Не удалось получить upload_url: {err}"
+
+    # 2) POST файла (multipart, поле `file`) и чтение СЫРОГО ответа сервера.
+    try:
+        import aiohttp
+        from io import BytesIO
+
+        form = aiohttp.FormData()
+        form.add_field("file", BytesIO(data), filename=title)
+        timeout = aiohttp.ClientTimeout(total=180)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(upload_url, data=form) as up_resp:
+                raw_body = await up_resp.text()
+        config_manager.log_message(
+            "INFO", f"upload_url HTTP {up_resp.status}, ответ: {raw_body[:300]}"
+        )
+    except Exception as e:
+        config_manager.log_message("ERROR", f"POST на upload_url не удался: {e}")
+        return None, f"загрузка файла на upload-сервер не удалась: {e}"
+
+    # 3) Разбираем ответ: ждём ключ `file`.
+    try:
+        upload_result = json.loads(raw_body)
+    except Exception as e:
+        config_manager.log_message("ERROR", f"upload-сервер вернул не-JSON: {e}: {raw_body[:300]}")
+        return None, f"upload-сервер вернул не-JSON: {raw_body[:300]}"
+    file_val = upload_result.get("file") if isinstance(upload_result, dict) else None
+    if not file_val:
+        config_manager.log_message(
+            "ERROR", f"upload-сервер не вернул `file`; ответ: {raw_body[:500]}"
+        )
+        return None, f"upload-сервер не вернул `file` (ответ: {raw_body[:300]})"
+
+    # 4) Сохраняем документ через docs.save.
+    try:
+        saved = await bot.api.request("docs.save", {"file": file_val, "title": title})
+        doc = saved["response"]
+        doc_type = doc["type"]
+        item = doc[doc_type]
+        owner = item["owner_id"]
+        did = item["id"]
+        key = item.get("access_key")
+        return (f"{doc_type}{owner}_{did}_{key}" if key else f"{doc_type}{owner}_{did}"), None
+    except Exception as e:
+        err = _vk_error_text(e)
+        config_manager.log_message(
+            "ERROR",
+            f"docs.save (title={title}, file_len={len(file_val)}): {err}",
         )
         return None, err
 
