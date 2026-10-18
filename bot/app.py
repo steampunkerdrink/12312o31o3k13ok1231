@@ -952,45 +952,76 @@ async def _do_self_update(user_id: int, message: Message):
         **os.environ,
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_ASKPASS": "/bin/true",
-        "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+        "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15",
     }
     proc = None
+    config_manager.log_message("INFO", f"self-update: git pull старт (base={base})")
+
+    # Пока идёт pull, раз в 10 c шлём heartbeat, чтобы не было «молчания».
+    async def _pull_heartbeat():
+        try:
+            while True:
+                await asyncio.sleep(10)
+                await message.answer("⏳ git pull ещё выполняется…")
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    hb = asyncio.create_task(_pull_heartbeat())
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "-C", base, "pull", "--ff-only",
+            "git",
+            "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=20",
+            "-C", base, "pull", "--ff-only",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env=git_env,
         )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=90)
     except asyncio.TimeoutError:
         try:
             if proc is not None:
                 proc.kill()
         except Exception:
             pass
-        config_manager.log_message("ERROR", "self-update: git pull не ответил за 60 c")
-        await message.answer("❌ git pull не ответил за 60 c (сеть/аутентификация). Проверь git вручную.")
+        config_manager.log_message("ERROR", "self-update: git pull не ответил за 90 c")
+        await message.answer("❌ git pull не ответил за 90 c (сеть/аутентификация). Проверь git вручную.")
         return
     except Exception as e:
         config_manager.log_message("ERROR", f"self-update: git pull сбой: {e}")
         await message.answer(f"❌ git pull не выполнился: {e}")
         return
+    finally:
+        hb.cancel()
+        try:
+            await hb
+        except (asyncio.CancelledError, Exception):
+            pass
+
     text = (out or b"").decode("utf-8", "replace").strip() or (err or b"").decode("utf-8", "replace").strip()
+    config_manager.log_message("INFO", f"self-update: git pull завершён code={proc.returncode}: {text[:300]}")
     if proc.returncode != 0:
         config_manager.log_message("ERROR", f"self-update: git pull code {proc.returncode}: {text}")
         await message.answer(f"❌ git pull упал (code {proc.returncode}):\n{text[:500]}")
         return
 
     # Проверяем, что новый код хотя бы компилируется; иначе откатываем pull.
-    pc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "py_compile",
-        os.path.join(base, "bot", "app.py"),
-        os.path.join(base, "bot", "config.py"),
-        os.path.join(base, "bot", "listener.py"),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    pc_out, pc_err = await pc.communicate()
+    config_manager.log_message("INFO", "self-update: py_compile старт")
+    try:
+        pc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "py_compile",
+            os.path.join(base, "bot", "app.py"),
+            os.path.join(base, "bot", "config.py"),
+            os.path.join(base, "bot", "listener.py"),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        pc_out, pc_err = await pc.communicate()
+    except Exception as e:
+        config_manager.log_message("ERROR", f"self-update: py_compile не запустился: {e}")
+        await message.answer(f"❌ py_compile не запустился: {e}")
+        return
+    config_manager.log_message("INFO", f"self-update: py_compile code={pc.returncode}")
     if pc.returncode != 0:
         pcerr = (pc_err or pc_out or b"").decode("utf-8", "replace").strip()
         config_manager.log_message("ERROR", f"self-update: новый код не прошёл py_compile — откат: {pcerr}")
