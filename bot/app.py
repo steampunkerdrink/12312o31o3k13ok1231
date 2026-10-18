@@ -749,10 +749,32 @@ def _encode_b64_parts(src_path: str, user_id: int, display_name: str | None = No
     parts: list = []
     f = None
     path = name = ""
-    wbytes = 0
-    buf = ""  # неполная строка (до 76 символов)
-    CHUNK = 3 * 1024 * 1024  # кратно 3 байтам → base64 блочно без потерь
+    wbytes = 0          # байт, записанных в текущую часть
+    buf = ""            # неполная строка (до 76 символов)
+    block = []          # строки, ещё не сброшенные в файл (батч-запись)
+    block_n = 0         # объём block в байтах
+    CHUNK = 3 * 1024 * 1024      # кратно 3 → base64 блочно без потерь
+    WRITE_FLUSH = 1024 * 1024    # сбрасываем в файл пачками по ~1 МБ (не построчно)
     with_error = None
+
+    def _open_part():
+        nonlocal f, path, name, wbytes
+        if f is not None:
+            # Сначала дописываем накопленный блок в текущий файл, потом сохраняем
+            # его размер и закрываем.
+            if block:
+                f.write("".join(block))
+                block.clear()
+            if parts:  # фиксируем размер закрываемой части
+                parts[-1][2] = wbytes
+            f.close()
+        name = f"{stem}.txt" if len(parts) == 0 else f"{stem}.part{len(parts)+1}.txt"
+        path = os.path.join(config_manager.TMP_DIR, f"send_{user_id}_{int(time.time())}_{name}")
+        f = open(path, "w", encoding="ascii", newline="\n")
+        parts.append([path, name, 0])
+        wbytes = 0
+        block_n = 0
+
     try:
         with open(src_path, "rb") as src:
             while True:
@@ -762,28 +784,28 @@ def _encode_b64_parts(src_path: str, user_id: int, display_name: str | None = No
                 buf += base64.b64encode(chunk).decode("ascii")
                 while len(buf) >= 76:
                     line, buf = buf[:76], buf[76:]
-                    # Новая часть, когда текущая уже набрала предельный объём.
-                    if f is None or (wbytes >= PART_MAX_BYTES and wbytes > 0):
-                        if f is not None:
-                            f.close()
-                        name = f"{stem}.txt" if len(parts) == 0 else f"{stem}.part{len(parts)+1}.txt"
-                        path = os.path.join(config_manager.TMP_DIR, f"send_{user_id}_{int(time.time())}_{name}")
-                        f = open(path, "w", encoding="ascii")
-                        parts.append([path, name, 0])
-                        wbytes = 0
-                    f.write(line + "\n")
+                    # Новая часть, когда текущая набрала предельный объём.
+                    if f is not None and wbytes >= PART_MAX_BYTES and wbytes > 0:
+                        _open_part()
+                    if f is None:
+                        _open_part()
+                    block.append(line + "\n")
                     wbytes += 77
-                    parts[-1][2] = wbytes
+                    block_n += 77
+                    if block_n >= WRITE_FLUSH:
+                        f.write("".join(block))
+                        block.clear()
+                        block_n = 0
             # Остаток последней строки (если объём не делится на 76 без остатка).
             if buf:
                 if f is None:
-                    name = f"{stem}.txt"
-                    path = os.path.join(config_manager.TMP_DIR, f"send_{user_id}_{int(time.time())}_{name}")
-                    f = open(path, "w", encoding="ascii")
-                    parts.append([path, name, 0])
-                    wbytes = 0
-                f.write(buf + "\n")
-                parts[-1][2] += len(buf) + 1
+                    _open_part()
+                block.append(buf + "\n")
+            if f is not None:
+                if block:
+                    f.write("".join(block))
+                    block.clear()
+                parts[-1][2] = wbytes
     except Exception as e:
         with_error = f"base64-кодирование не удалось: {e}"
     finally:
@@ -839,6 +861,12 @@ async def _download_url_to_tmp(url: str, user_id: int):
         return None, str(e)
 
 
+def _read_all(path: str) -> bytes:
+    """Читает файл целиком (для передачи в потоке через asyncio.to_thread)."""
+    with open(path, "rb") as f:
+        return f.read()
+
+
 async def _send_file_command(user_id: int, text: str, message: Message):
     """`send <путь|url>` — прислать файл или папку (с сервера или по ссылке) в этот чат.
 
@@ -872,11 +900,18 @@ async def _send_file_command(user_id: int, text: str, message: Message):
             return
 
     # ── Кодирование в base64 (.txt) — потоково, с разбиением на части ──
-    await message.answer("🔒 Кодирую в base64 (.txt)…")
-    parts, stem, b64_err = _encode_b64_parts(path, user_id, display_name)
+    await message.answer("🔒 Кодирую в base64 (.txt), файл большой — может занять время…")
+    config_manager.log_message("INFO", f"Админ [{user_id}] start base64: {path}")
+    # Тяжёлую синхронную работу выполняем в отдельном потоке, чтобы не блокировать
+    # event loop (иначе Long Poll «замирает» на время кодирования большого файла).
+    parts, stem, b64_err = await asyncio.to_thread(_encode_b64_parts, path, user_id, display_name)
     if not parts:
         await message.answer(f"Не удалось закодировать файл: {b64_err}")
+        config_manager.log_message("ERROR", f"Админ [{user_id}] b64 fail: {b64_err}")
         return
+    config_manager.log_message(
+        "INFO", f"Админ [{user_id}] base64 готово: {len(parts)} частей, итого {_fmt_bytes(sum(p[2] for p in parts))}"
+    )
 
     if doc_uploader is None:
         await message.answer("Загрузчик документов недоступен.")
@@ -887,8 +922,8 @@ async def _send_file_command(user_id: int, text: str, message: Message):
     for p_path, p_name, _p_size in parts:
         await _show_typing(user_id)
         try:
-            with open(p_path, "rb") as f:
-                data = f.read()
+            # Чтение ведём в потоке, чтобы не блокировать event loop на больших частях.
+            data = await asyncio.to_thread(_read_all, p_path)
         except Exception as e:
             config_manager.log_message("ERROR", f"send: чтение файла {p_path} не удалось: {e}")
             await message.answer(f"Не удалось прочитать файл {p_name}: {e}")
