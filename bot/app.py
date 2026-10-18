@@ -721,19 +721,22 @@ async def _upload_document(data: bytes, peer_id: int, title: str):
         return None, err
 
 
-def _encode_b64(src_path: str, user_id: int):
+def _encode_b64(src_path: str, user_id: int, display_name: str | None = None):
     """Кодирует файл в base64 и сохраняет как .txt в tmp/.
 
     VK блокирует архивы с непроверяемым содержимым (empty_archive/wrong_arch_file),
     поэтому вместо упаковки используем base64: .txt — обычный документ, VK его примет,
     а содержимое скрыто кодированием. Декодируется у получателя.
-    Наконец, в имени убираем ИСХОДНОЕ расширение файла, чтобы получатель не видел тип.
+    В имени убираем ИСХОДНОЕ расширение файла, чтобы получатель не видел тип.
+    Если передан display_name — берём имя из него (для URL-файлов, чей путь содержит
+    служебный префикс `dl_<id>_`), иначе — из basename пути.
 
     Возвращает (txt_path, txt_name, None) при успехе, иначе (None, None, сообщение об ошибке).
     """
     import base64
 
-    base = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(src_path.rstrip("/\\"))) or "file"
+    src_name = os.path.basename(src_path.rstrip("/\\")) if display_name is None else display_name
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", src_name) or "file"
     # Убираем последнее расширение исходного файла (".exe" → ""): имя не выдаёт тип.
     stem = os.path.splitext(base)[0] or base
     txt_name = f"{stem}.txt"
@@ -805,12 +808,16 @@ async def _send_file_command(user_id: int, text: str, message: Message):
         return
     raw_arg = parts[1].strip().strip('"').strip("'")
 
+    display_name = None
+
     if raw_arg.lower().startswith(("http://", "https://")):
         await message.answer(f"⏬ Скачиваю: {raw_arg}")
         path, info = await _download_url_to_tmp(raw_arg, user_id)
         if path is None:
             await message.answer(f"Не удалось скачать файл: {info}")
             return
+        # Для URL используем исходное имя (путь содержит служебный префикс dl_<id>_).
+        display_name = info if isinstance(info, str) else None
     else:
         base = shell_worker.last_valid_path or "/"
         path = os.path.expanduser(raw_arg if os.path.isabs(raw_arg) else os.path.join(base, raw_arg))
@@ -820,7 +827,7 @@ async def _send_file_command(user_id: int, text: str, message: Message):
 
     # ── Кодирование в base64 (.txt) — VK принимает, содержимое скрыто ──
     await message.answer("🔒 Кодирую в base64 (.txt)…")
-    txt_path, txt_name, b64_err = _encode_b64(path, user_id)
+    txt_path, txt_name, b64_err = _encode_b64(path, user_id, display_name)
     if txt_path is None:
         await message.answer(f"Не удалось закодировать файл: {b64_err}")
         return
