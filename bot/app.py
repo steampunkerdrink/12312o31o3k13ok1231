@@ -921,7 +921,24 @@ def _join_hint(names, out_name: str, is_base64: bool = False) -> str:
     )
 
 
+# Флаг: не запускаем два self-update одновременно (два git pull конкурируют за index.lock).
+_self_update_running = False
+
+
 async def _self_update(user_id: int, message: Message):
+    """Обёртка self-update с защитой от параллельного запуска."""
+    global _self_update_running
+    if _self_update_running:
+        await message.answer("⏳ Обновление уже выполняется, подожди…")
+        return
+    _self_update_running = True
+    try:
+        await _do_self_update(user_id, message)
+    finally:
+        _self_update_running = False
+
+
+async def _do_self_update(user_id: int, message: Message):
     """Self-update: git pull в папке бота (ff-only) + перезапуск процесса.
 
     Перед рестартом проверяем, что новый код компилируется (py_compile); иначе
@@ -930,12 +947,31 @@ async def _self_update(user_id: int, message: Message):
     """
     base = config_manager.BASE_DIR
     await message.answer("🔄 Выполняю `git pull`…")
+    # git не должен ждать ввода (пароль/подтверждение SSH-ключа), иначе бот «молчит».
+    git_env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "/bin/true",
+        "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+    }
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "git", "-C", base, "pull", "--ff-only",
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=git_env,
         )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=120)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        try:
+            if proc is not None:
+                proc.kill()
+        except Exception:
+            pass
+        config_manager.log_message("ERROR", "self-update: git pull не ответил за 60 c")
+        await message.answer("❌ git pull не ответил за 60 c (сеть/аутентификация). Проверь git вручную.")
+        return
     except Exception as e:
         config_manager.log_message("ERROR", f"self-update: git pull сбой: {e}")
         await message.answer(f"❌ git pull не выполнился: {e}")
