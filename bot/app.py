@@ -878,6 +878,39 @@ def _read_all(path: str) -> bytes:
         return f.read()
 
 
+def _join_hint(names, out_name: str, is_base64: bool = False) -> str:
+    """Подсказка по склейке нарезанного файла (Windows/Linux, с учётом переименований).
+
+    is_base64=True — части это base64-текст, после склейки нужен декод.
+    """
+    order = " ".join(f'"{n}"' for n in names)
+    order_win = "+".join(f'"{n}"' for n in names)
+    quoted = ", ".join(f'"{n}"' for n in names)
+    warn = (
+        "\nСклей части (порядок важен!).\n"
+        "💡 VK может переименовать части при скачивании — сверься с реальными именами "
+        "в папке (Windows: dir, Linux: ls) и подставь их ниже.\n"
+    )
+    if is_base64:
+        return warn + (
+            f"Linux:   cat {order} | base64 -d > \"{out_name}\"\n"
+            f"Windows (cmd):   склей и декодируй:\n"
+            f"  copy /b {order_win} combined.b64\n"
+            f"  certutil -decode combined.b64 \"{out_name}\"\n"
+            f"Windows (PowerShell), склейка байтов:\n"
+            f"  $files = @({quoted})\n"
+            f"  $out = [IO.File]::Create(\"$PWD\\combined.b64\"); foreach($f in $files){{ $b=[IO.File]::ReadAllBytes($f); $out.Write($b,0,$b.Length) }}; $out.Close()\n"
+            f"  certutil -decode combined.b64 \"{out_name}\""
+        )
+    return warn + (
+        f"Linux:   cat {order} > \"{out_name}\"\n"
+        f"Windows (cmd):   copy /b {order_win} \"{out_name}\"\n"
+        f"Windows (PowerShell), склейка байтов:\n"
+        f"  $files = @({quoted})\n"
+        f"  $out = [IO.File]::Create(\"$PWD\\{out_name}\"); foreach($f in $files){{ $b=[IO.File]::ReadAllBytes($f); $out.Write($b,0,$b.Length) }}; $out.Close()"
+    )
+
+
 def _split_file(src: str, user_id: int, out_name: str, max_bytes: int):
     """Бинарно делит файл на части <= max_bytes, если он больше лимита.
 
@@ -981,13 +1014,7 @@ async def _send_file_command(user_id: int, text: str, message: Message):
         head = (
             f"📄 Файл разбит на {len(parts)} частей (итого {_fmt_bytes(total)}): {', '.join(names)}"
         )
-        order = " ".join(f'"{n}"' for n in names)
-        order_win = "+".join(f'"{n}"' for n in names)
-        tail = (
-            "\nСклей части (порядок важен!):\n"
-            f"Linux:   cat {order} > \"{out_name}\"\n"
-            f"Windows: copy /b {order_win} \"{out_name}\""
-        )
+        tail = _join_hint(names, out_name)
     try:
         await bot.api.messages.send(
             peer_id=user_id, message=head + tail, attachment=attachments, random_id=0
@@ -1086,17 +1113,10 @@ async def _send_b64_command(user_id: int, text: str, message: Message):
         )
     else:
         head = (
-            f"🔑 Файл разбит на {len(parts)} частей по ~95 МБ "
+            f"🔑 Файл разбит на {len(parts)} частей по ~50 МБ "
             f"(итого {_fmt_bytes(total_text)}): {', '.join(names)}"
         )
-        order = " ".join(f'"{n}"' for n in names)          # cat a b
-        order_win = "+".join(f'"{n}"' for n in names)      # copy /b a+b
-        tip = (
-            f"Склей части (порядок важен!), затем декодируй:\n"
-            f"Linux:   cat {order} | base64 -d > \"{stem}\"\n"
-            f"Windows: copy /b {order_win} out.b64\n"
-            f"         certutil -decode out.b64 \"{stem}\"\n"
-        )
+        tip = _join_hint(names, stem, is_base64=True)
     try:
         await bot.api.messages.send(
             peer_id=user_id,
@@ -1345,7 +1365,11 @@ async def handle_message(message: Message):
             session["writer"].write((f"( {bg_cmd} ) &\n").encode("utf-8"))
             await session["writer"].drain()
             config_manager.log_message("INFO", f"Админ [{user_id}] bg-запуск: {bg_cmd}")
-            await message.answer(f"▶️ Фон: `{bg_cmd}`. Вывод появится в чате по мере работы.")
+            await message.answer(
+                f"▶️ Фон: `{bg_cmd}`. Вывод появится в чате по мере работы.\n"
+                "⚠️ Бесконечные команды (ping без -c, tail -f, top) будут забивать чат; "
+                "Ctrl+C фоновые задачи НЕ убивает — для остановки используй 💀 Hard Reset."
+            )
         except Exception as e:
             config_manager.log_message("ERROR", f"Ошибка bg-запуска: {e}")
             await message.answer(f"❌ Ошибка фонового запуска: {e}")
